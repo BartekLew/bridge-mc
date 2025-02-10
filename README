@@ -1,0 +1,9 @@
+A monte carlo engine for game of bridge. It aims to generate massive
+amount of random hands (with possible constraints) and estimating
+probabilities of various outcomes.
+
+Requirements: SBCL
+
+For now, source code is work in progress. There are various functions
+for doing different things and one expression that reflects what I'm
+working on so far.
