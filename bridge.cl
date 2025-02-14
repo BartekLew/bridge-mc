@@ -69,8 +69,8 @@
         (and x (list x (append hd tl)))))
 
 (test (take 3 '(1 2 3 4 5)) '(4 (1 2 3 5)) equal)
-(test (take 0 '(1 2 10 100) '(1 '(2 10 100)) equal)
-(test (take 3 '(1 2 3)) '(3 (1 2)) equal)
+(test (take 0 '(1 2 10 100)) '(1 (2 10 100)) equal)
+(test (take 2 '(1 2 3)) '(3 (1 2)) equal)
 
 ; take x random elements from lst
 ; return list of: chosen elements list and list of remaining elements
@@ -79,13 +79,6 @@
         (let ((once (take (random (length lst)) lst)))
             (let-from* once (card rest)
                 (deal (- amount 1) rest (cons card acc))))))
-
-; use deal function to create number of amount-element
-; subsets, so that nothing is left.
-(defun deal-all (amount lst &optional acc)
-    (if (<= (length lst) 0) acc
-        (let-from! (deal amount lst) (rest hand)
-            (deal-all amount rest (cons hand acc)))))
 
 ; pretty print for deal (result of deal-all function)
 (defun print-deal (hands &optional (names '(n e s w)))
@@ -131,12 +124,19 @@
               (loop for x in acc
                     collect (sort x #'<))))
 
+; use deal function to create number of amount-element
+; subsets, so that nothing is left.
+(defun deal-all (amount lst &optional acc)
+    (if (<= (length lst) 0) acc
+        (let-from! (deal amount lst) (rest hand)
+            (deal-all amount rest (cons hand acc)))))
+
 ; create a histogram from list    
 (defun histogram (lists &optional acc)
     (if (not lists) (sort acc (lambda (a b)
                                   (> (second a) (second b))))
         (let ((p (position-if (lambda (x)
-                                (let-from* x (val hits)
+                                (let-from* x (val)
                                     (equal val (car lists))))
                               acc)))
             (histogram (cdr lists) 
@@ -145,12 +145,22 @@
                                    collect (list (car x) (if (= i p) (+ (second x) 1) (second x))))
                              (cons (list (car lists) 1) acc))))))
     
-(defun suit-distribution (hand)
-    (sort (mapcar #'length hand) #'<))
+(defun hcp-val (rank)
+    (if (> rank 8) (- rank 8) 0))
+
+(defun strength (hcp)
+    (cond ((< hcp 7) 'empty)
+          ((< hcp 12) 'support)
+          ((<= hcp 18) 'open)
+          ((> hcp 18) 'strong)))
+
+(defun suit-strength-distribution (hand)
+    (cons (strength (apply #'+ (mapcar (lambda (lst) (apply #'+ (mapcar #'hcp-val lst))) hand)))
+          (sort (mapcar #'length hand) #'<)))
 
 ; current goal: histogram of probable suit distributions in hands
 (histogram
     (apply #'append
-          (loop for i from 0 to 250
-                collect (mapcar #'suit-distribution
+          (loop for i from 0 to 2500
+                collect (mapcar #'suit-strength-distribution
                                 (mapcar #'hand (deal-all 13 (all-cards)))))))
