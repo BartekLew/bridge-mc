@@ -80,12 +80,6 @@
             (let-from* once (card rest)
                 (deal (- amount 1) rest (cons card acc))))))
 
-; pretty print for deal (result of deal-all function)
-(defun print-deal (hands &optional (names '(n e s w)))
-    (loop for name in names
-          for hand in hands
-          do (format t "~A: ~A~%" name (hand hand))))
-
 ; Comparison function for sorting cards
 (defun suit<> (a b)
     (let ((an (position a '(c d h s)))
@@ -131,10 +125,17 @@
         (let-from! (deal amount lst) (rest hand)
             (deal-all amount rest (cons hand acc)))))
 
+; pretty print for deal (result of deal-all function)
+(defun print-deal (hands &optional (names '(n e s w)))
+    (loop for name in names
+          for hand in hands
+          do (format t "~A: ~A~%" name (hand hand))))
+
 ; create a histogram from list    
-(defun histogram (lists &optional acc)
-    (if (not lists) (sort acc (lambda (a b)
-                                  (> (second a) (second b))))
+(defun histogram (lists &optional acc (total 0))
+    (if (not lists) (mapcar (lambda (x) (list (first x) (float (/ (second x) total))))
+                            (sort acc (lambda (a b)
+                                          (> (second a) (second b)))))
         (let ((p (position-if (lambda (x)
                                 (let-from* x (val)
                                     (equal val (car lists))))
@@ -143,7 +144,8 @@
                        (if p (loop for i from 0
                                    for x in acc
                                    collect (list (car x) (if (= i p) (+ (second x) 1) (second x))))
-                             (cons (list (car lists) 1) acc))))))
+                             (cons (list (car lists) 1) acc))
+                       (+ total 1)))))
     
 (defun hcp-val (rank)
     (if (> rank 8) (- rank 8) 0))
