@@ -32,6 +32,11 @@
                                    `(nth ,i ,lst)))
               ,@body)))
 
+(defmacro letcar (lst &body body)
+    `(let ((head (car ,lst))
+           (tail (cdr ,lst)))
+        ,@body))
+    
 (defmacro let-from! (exp names &body body)
     (let ((len (length names)))
         `(let ((ans ,exp))
@@ -146,7 +151,54 @@
                                    collect (list (car x) (if (= i p) (+ (second x) 1) (second x))))
                              (cons (list (car lists) 1) acc))
                        (+ total 1)))))
-    
+
+(defun merge-by (merger list &optional acc)
+    (if (not list) acc
+        (letcar list
+            (labels ((self (x lst &optional acc)
+                        (if lst (let ((merged (funcall merger x (car lst))))
+                                    (if merged (append acc (cons merged (cdr lst)))
+                                               (self x (cdr lst) (append acc (list (car lst)))))))))
+                (let ((newacc (self head acc)))
+                    (if newacc (merge-by merger tail newacc)
+                               (merge-by merger tail (cons head acc))))))))
+
+(defun car* (x)
+    (if (listp x) (car x) x))
+
+(defun histmerge (a b)
+    (if (and a b)
+        (let-from* a (aval afreq)
+            (let-from* b (bval bfreq bchildren)
+                (if bchildren
+                    (if (equal (car aval) bval)
+                        (list (car aval) (+ afreq bfreq)
+                              (cons (list (cdr aval) afreq) bchildren)))
+                    (if (equal (car aval) (car bval))
+                        (list (car aval) (+ afreq bfreq)
+                              (list (list (cdr aval) afreq) (list (cdr bval) bfreq)))))))))
+
+(test (histmerge '((a b c) 0.1) '(a 0.1 (((a b) 0.05)
+                                         ((c b) 0.05))))
+      '(A 0.2 (((B C) 0.1) ((A B) 0.05) ((C B) 0.05))) equal)
+
+(test (histmerge '(((2 3 4 4) SUPPORT) 0.09506197)
+                 '(((2 3 4 4) OPEN) 0.06947221))
+      '((2 3 4 4) 0.16453418 (((SUPPORT) 0.09506197) ((OPEN) 0.06947221)))
+      equal)
+
+(test (histmerge '(((2 3 4 4) EMPTY) 0.04818073)
+                 '((2 3 4 4) 0.16453418 (((SUPPORT) 0.09506197)((OPEN) 0.06947221))))
+      '((2 3 4 4) 0.21271491
+         (((EMPTY) 0.04818073) ((SUPPORT) 0.09506197) ((OPEN) 0.06947221)))
+      equal)
+
+
+(test (merge-by #'histmerge '(((a b c) 0.7)
+                              ((a b d) 0.3)
+                              ((c d f) 0.1)))
+      '(((C D F) 0.1) (A 1.0 (((B D) 0.3) ((B C) 0.7)))) equal)
+
 (defun hcp-val (rank)
     (if (> rank 8) (- rank 8) 0))
 
@@ -156,13 +208,23 @@
           ((<= hcp 18) 'open)
           ((> hcp 18) 'strong)))
 
-(defun suit-strength-distribution (hand)
-    (cons (strength (apply #'+ (mapcar (lambda (lst) (apply #'+ (mapcar #'hcp-val lst))) hand)))
-          (sort (mapcar #'length hand) #'<)))
+(defun suit-distribution (hand)
+    (sort (mapcar #'length hand) #'<))
 
-; current goal: histogram of probable suit distributions in hands
-(histogram
-    (apply #'append
-          (loop for i from 0 to 2500
-                collect (mapcar #'suit-strength-distribution
-                                (mapcar #'hand (deal-all 13 (all-cards)))))))
+(defun suit-strength (hand)
+    (strength (apply #'+ (mapcar (lambda (lst) (apply #'+ (mapcar #'hcp-val lst))) hand))))
+
+(defun f-cons (&rest functions)
+    (lambda (&rest input)
+        (mapcar (lambda (f) (apply f input))
+                functions)))
+
+(defun mc-case (measures &key (volume 2500))
+    (merge-by #'histmerge
+        (histogram
+            (apply #'append
+                (loop for i from 0 to volume
+                      collect (mapcar (apply #'f-cons measures)
+                                      (mapcar #'hand (deal-all 13 (all-cards)))))))))
+
+(mc-case '(suit-strength suit-distributions))
