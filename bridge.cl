@@ -103,7 +103,7 @@
            (suit (read-from-string (subseq asstr 0 1)))
            (rank (position (read-from-string (subseq asstr 1))
                            '(2 3 4 5 6 7 8 9 10 J Q K A))))
-        (and suit rank (list suit rank))))
+     (and suit rank (list suit rank))))
 
 (test (card "S10") '(s 8) equal)
 (test (card "CK") '(c 11) equal)
@@ -167,11 +167,20 @@
 ;; Generally we stick to structure (rest hand). Whenever we deal a card
 ;; or cards, we return them with the list of remaining cards BEFORE
 
+(define-condition bad-index (error)
+    ((val :initarg :=
+          :reader val)
+     (max-idx :initarg :/
+              :reader max-idx)))
+
 (defun take (idx lst)
+    (let ((len (length lst)))
+        (if (>= idx len) 
+            (error 'bad-index := idx :/ len)))
     (let ((x (nth idx lst))
           (hd (subseq lst 0 idx))
           (tl (subseq lst (+ idx 1))))
-        (and x (list x (append hd tl)))))
+        (list x (append hd tl))))
 
 (test (take 3 '(1 2 3 4 5)) '(4 (1 2 3 5)) equal)
 (test (take 0 '(1 2 10 100)) '(1 (2 10 100)) equal)
@@ -193,17 +202,23 @@
         (let-from! (deal amount lst) (rest hand)
             (deal-all amount rest (cons hand acc)))))
 
-(defun hcp-val (rank)
+(defun rank-hcp (rank)
     (if (> rank 8) (- rank 8) 0))
 
-(defun cards-by-hcp (rest &optional acc)
+(defun card-hcp (card)
+    (rank-hcp (second card)))
+
+(defun card-suitno (card)
+    (position (car card) '(c d h s)))
+
+(defun cards-by (classifier rest &optional acc)
     (if rest
         (letcar rest
-            (let ((val (hcp-val (second head))))
-                (cards-by-hcp tail (push-pos acc val head))))
+            (let ((val (funcall classifier head)))
+                (cards-by classifier tail (push-pos acc val head))))
     acc))
 
-(test (cards-by-hcp (all-cards))
+(test (cards-by #'card-hcp (all-cards))
       '(((S 8) (S 7) (S 6) (S 5) (S 4) (S 3) (S 2) (S 1) (S 0) (H 8) (H 7) (H 6)
         (H 5) (H 4) (H 3) (H 2) (H 1) (H 0) (D 8) (D 7) (D 6) (D 5) (D 4) (D 3)
         (D 2) (D 1) (D 0) (C 8) (C 7) (C 6) (C 5) (C 4) (C 3) (C 2) (C 1) (C 0))
@@ -211,6 +226,24 @@
         ((S 11) (H 11) (D 11) (C 11)) ((S 12) (H 12) (D 12) (C 12)))
       equal)
 
+(test (cards-by #'card-suitno 
+                '((C 1) (C 3) (C 4) (C 7) (C 9) (C 10) (C 11) (D 0) (D 1) (D 2) (D 3) (D 4)
+                  (D 5) (D 6) (D 7) (D 8) (D 9) (D 10) (D 11) (D 12) (H 0) (H 1) (H 2) (H 3)
+                  (H 4) (H 6) (H 7) (H 8) (H 9) (H 10) (H 11) (H 12) (S 0) (S 4) (S 5) (S 6)
+                  (S 7) (S 8) (S 9)))
+      '(((C 11) (C 10) (C 9) (C 7) (C 4) (C 3) (C 1))
+        ((D 12) (D 11) (D 10) (D 9) (D 8) (D 7) (D 6) (D 5) (D 4) (D 3) (D 2) (D 1) (D 0))
+        ((H 12) (H 11) (H 10) (H 9) (H 8) (H 7) (H 6) (H 4) (H 3) (H 2) (H 1) (H 0))
+        ((S 9) (S 8) (S 7) (S 6) (S 5) (S 4) (S 0)))
+    equal)
+
+(test (cards-by #'card-suitno
+                '((C 1) (H 6) (C 7) (D 10) (S 5) (C 10) (S 7) (H 2) (C 2) (H 9) (S 12) (H 12) (S 8)))
+      '(((C 2) (C 10) (C 7) (C 1))
+        ((D 10))
+        ((H 12) (H 9) (H 2) (H 6))
+        ((S 8) (S 12) (S 7) (S 5)))
+      equal)
 
 (defun strength (hcp)
     (cond ((< hcp 7) 'empty)
@@ -283,19 +316,42 @@
      '((6 7 8 1 2 3) (9 10 11 3 4 5))
      equal)
 
-(defun hcp-hand (target-hcp &optional cards)
-    (let* ((division (cards-by-hcp (or cards (all-cards))))
-           (spot-cards (nth 0 division))
-           (figures (cdr division))
-           (fig-supply (mapcar #'length figures))
-           (fig-permuts (valid-hcp-sums target-hcp fig-supply))
-           (permut (randcar fig-permuts)))
+(define-condition unknown-kind (error)
+    ((kind :initarg :=
+           :reader kind)))
+
+(define-condition wrong-distribution (error)
+    ((distribution :initarg :=
+                   :reader distribution)))
+
+(defun classifier-for-kind (kind)
+    (cond ((eq kind 'hcp) #'card-hcp)
+          ((eq kind 'distribution) #'card-suitno)
+          (t (error 'unknown-kind := kind))))
+
+(defun permut-for-kind (kind target division)
+    (cond ((eq kind 'hcp) (let* ((figures (cdr division))
+                                 (fig-supply (mapcar #'length figures))
+                                 (fig-permuts (valid-hcp-sums target fig-supply))
+                                 (fig-permut (randcar fig-permuts)))
+                              (cons (- 13 (apply #'+ fig-permut)) fig-permut)))
+          ((eq kind 'distribution) (if (= (apply #'+ target) 13) target
+                                       (error 'wrong-distribution := target)))))
+
+(defun gen-hand (target kind &optional cards)
+    (let* ((division (cards-by (classifier-for-kind kind) 
+                               (or cards (all-cards))))
+           (permut (permut-for-kind kind target division)))
         (if permut
-            (let* ((figs (loop for f in figures
-                               for n in permut
-                               collect (deal n f)))
-                   (spots (deal (- 13 (apply #'+ permut)) spot-cards)))
-                (zip-deals (cons spots figs))))))
+            (zip-deals (loop for class in division
+                             for amount in permut
+                             collect (deal amount class))))))
+
+(let-from! (gen-hand 11 'hcp) (rest n)
+    (print-deal (deal-all 13 rest (list n))))
+
+(let-from! (gen-hand '(5 2 2 4) 'distribution) (rest n)
+    (print-deal (deal-all 13 rest (list n))))
 
 ;======================================
 ; Monte-carlo deals & reporting stats
@@ -363,16 +419,19 @@
 (defun suit-distribution (hand)
     (sort (mapcar #'length hand) #'<))
 
+(defun fit-n-distrib (trump)
+    (list (lambda (hand)
+             (length (nth trump hand)))
+          (lambda (hand)
+             (mapcar #'length (second (take trump hand))))))
+
 (defun suit-strength (hand)
-    (strength (apply #'+ (mapcar (lambda (lst) (apply #'+ (mapcar #'hcp-val lst))) hand))))
+    (strength (apply #'+ (mapcar (lambda (lst) (apply #'+ (mapcar #'rank-hcp lst))) hand))))
 
 (defun f-cons (&rest functions)
     (lambda (&rest input)
         (mapcar (lambda (f) (apply f input))
                 functions)))
-
-(let-from! (hcp-hand 20) (rest n)
-    (print-deal (deal-all 13 rest (list n))))
 
 (defun mc-case (measures &key (volume 2500) first-hand)
     (merge-by #'histmerge
@@ -386,4 +445,6 @@
                                                       (deal-all 13 rest))
                                                   (deal-all 13 (all-cards))))))))))
 
-(mc-case '(suit-strength suit-distribution) :first-hand '(hcp-hand 18))
+(mc-case '(suit-strength suit-distribution) :first-hand '(gen-hand 18 'hcp))
+
+(mc-case (fit-n-distrib 0) :first-hand '(gen-hand '(4 4 1 4) 'distribution))
