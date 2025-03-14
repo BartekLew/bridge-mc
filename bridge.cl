@@ -94,6 +94,40 @@
         (let ((i (random (length lst))))
             (nth i lst))))
 
+(defun randcar-weights (lst)
+    (let* ((total-weight (apply #'+ (mapcar #'first lst)))
+           (weight (random total-weight)))
+        (labels ((self (weight rest)
+                    (letcar rest
+                        (if (< weight (first head)) (second head)
+                                                    (self (- weight (first head)) tail)))))
+            (if (> total-weight 0) (self weight lst)))))
+
+(loop for y from 0 to 1000
+      do (let ((sut (loop for x from 0 to 160
+                          collect (randcar-weights '((1 1) (5 2) (10 3))))))
+            (let ((sum (apply #'+ sut)))
+                (test (position-if (lambda (x) (> x 3)) sut) nil eq)
+                (test (and (> sum 380) (< sum 440)) T eq))))
+            
+(defun zip (&rest lists)
+    (labels ((self (lists &optional acc)
+                (if (not (car lists)) (reverse acc)
+                    (self (loop for l in lists
+                                collect (cdr l))
+                          (cons (loop for l in lists
+                                      collect (car l))
+                                acc)))))
+        (self lists)))
+
+(test (zip '(1 2 3 4) '(4 5 6 7) '(8 9 10 11))
+      '((1 4 8) (2 5 9) (3 6 10) (4 7 11))
+      equal)
+
+(defun zip-weight (list f)
+    (zip (mapcar f list)
+         list))
+
 ;; ===========================
 ;; Cards and printing them
 ;; ===========================
@@ -329,11 +363,31 @@
           ((eq kind 'distribution) #'card-suitno)
           (t (error 'unknown-kind := kind))))
 
+(defun k-permutation (length opts)
+    (apply #'* (loop for x from (+ (- length opts) 1)
+                           to length
+                     collect x)))
+
+(test (k-permutation 3 2) 6 eq)
+(test (k-permutation 4 2) 12 eq)
+
+(defun permut-weight (supply permut)
+    (apply #'* (loop for s in supply
+                     for p in permut
+                     collect (k-permutation s p))))
+    
+(test (permut-weight '(4 4 4 4) '(1 2 0 0)) 48 eq)
+(test (permut-weight '(1 2 0 0) '(1 2 0 0)) 2 eq)
+(test (permut-weight '(0 0 0 0) '(0 3 0 0)) 0 eq)
+(test (permut-weight '(0 1 0 0) '(0 3 0 0)) 0 eq)
+    
 (defun permut-for-kind (kind target division)
     (cond ((eq kind 'hcp) (let* ((figures (cdr division))
                                  (fig-supply (mapcar #'length figures))
                                  (fig-permuts (valid-hcp-sums target fig-supply))
-                                 (fig-permut (randcar fig-permuts)))
+                                 (fig-permut (randcar-weights 
+                                                (zip-weight (curry #'permut-weight fig-supply)
+                                                            fig-permuts))))
                               (cons (- 13 (apply #'+ fig-permut)) fig-permut)))
           ((eq kind 'distribution) (if (= (apply #'+ target) 13) target
                                        (error 'wrong-distribution := target)))))
@@ -423,7 +477,7 @@
     (list (lambda (hand)
              (length (nth trump hand)))
           (lambda (hand)
-             (mapcar #'length (second (take trump hand))))))
+             (sort (mapcar #'length (second (take trump hand))) #'<))))
 
 (defun suit-strength (hand)
     (strength (apply #'+ (mapcar (lambda (lst) (apply #'+ (mapcar #'rank-hcp lst))) hand))))
@@ -447,4 +501,4 @@
 
 (mc-case '(suit-strength suit-distribution) :first-hand '(gen-hand 18 'hcp))
 
-(mc-case (fit-n-distrib 0) :first-hand '(gen-hand '(4 4 1 4) 'distribution))
+(mc-case (fit-n-distrib 0) :first-hand '(gen-hand '(5 3 3 2) 'distribution))
