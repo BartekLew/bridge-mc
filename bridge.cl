@@ -124,9 +124,25 @@
       '((1 4 8) (2 5 9) (3 6 10) (4 7 11))
       equal)
 
-(defun zip-weight (list f)
+(defun zip-weight (f list)
     (zip (mapcar f list)
          list))
+
+(defun wrand (weights)
+    (let ((sum (apply #'+ weights)))
+        (if (eq (type-of sum) 'ratio)
+            (let ((d (denominator sum)))
+                (setf sum (* sum d))
+                (loop for x in weights
+                      for i from 0
+                      do (setf (nth i weights) (* (nth i weights) d)))))
+ 
+        (let ((target (random sum)))
+            (labels ((self (ws tg i)
+                           (letcar ws
+                                   (if (< tg head) i
+                                       (self tail (- tg head) (+ i 1))))))
+                (self weights target 0)))))
 
 ;; ===========================
 ;; Cards and printing them
@@ -391,6 +407,40 @@
                               (cons (- 13 (apply #'+ fig-permut)) fig-permut)))
           ((eq kind 'distribution) (if (= (apply #'+ target) 13) target
                                        (error 'wrong-distribution := target)))))
+
+(defun card-weight (hcp-dist suit-dist card)
+    (let ((hcpa (or (nth (card-hcp card) hcp-dist) 1))
+          (suita (or (nth (card-suitno card) suit-dist) 1)))
+        (* (if (> hcpa 0) (/ 1 hcpa) 0)
+           (if (> suita 0) (/ 1 suita) 0))))
+
+(defmacro -= (form amount)
+    `(setf ,form (- ,form ,amount)))
+
+(defun take-many (source getter amount &optional acc)
+    (if (= amount 0) (list acc source)
+        (let-from! (funcall getter source) (card rest)
+            (take-many rest getter (- amount 1) (cons card acc)))))
+
+(defun gen-hand (hcp distrib &optional cards)
+    (if (not cards) (setf cards (all-cards)))
+    (let* ((division (cards-by #'card-hcp cards))
+           (hcp-target (if hcp (permut-for-kind 'hcp hcp division)))
+           (highcards (apply #'append (cdr division))))
+        (flet ((draw (cardset amount)
+            (take-many cardset
+                       (lambda (lst) 
+                         (let ((idx (wrand (mapcar (curry #'card-weight hcp-target distrib)
+                                                   lst))))
+                           (let-from! (take idx lst) (card rest)
+                               (-= (nth (card-hcp card) hcp-target) 1)
+                               (-= (nth (card-suitno card) distrib) 1)
+                               (list card rest))))
+                       amount)))
+            (zip-deals (list (draw highcards (apply #'+ (cdr hcp-target)))
+                             (draw (car division) (car hcp-target)))))))
+                         
+(hand (car (gen-hand 15 '(4 3 3 3))))
 
 (defun gen-hand (target kind &optional cards)
     (let* ((division (cards-by (classifier-for-kind kind) 
