@@ -23,7 +23,7 @@
 (defmacro test (form result test)
   `(let ((ans ,form))
      (if (not (,test ans ,result))
-       (format t "TEST FAILED: ~A != ~A" ans ,result))))
+       (format t "TEST FAILED: ~A~%   != ~A~%" ans ,result))))
 
 (defmacro let-from (lst names &body body)
     (let ((len (length names)))
@@ -203,13 +203,32 @@
               (loop for x in acc
                     collect (sort x #'<))))
 
+(defun unhand (hand)
+    (apply #'append (loop for suit in '(C D H S)
+                          for cards in hand
+                          collect (loop for card in cards
+                                        collect (list suit (position card 
+                                                                    '(2 3 4 5 6 7 8 9 10 J Q K A)))))))
+    
+
+(test (unhand '((2 3 A K) (2) (Q J) (10)))
+      '((C 0) (C 1) (C 12) (C 11) (D 0) (H 10) (H 9) (S 8))
+      equal)
+
+(defun print-hand (hand)
+    (apply #'format (append (list nil "~A ~A ~A ~A")
+                            (loop for suit in '("♣" "♦" "♥" "♠")
+                                  for cards in (mapcar (curry #'mapcar (lambda (x) 
+                                                                (nth x '(2 3 4 5 6 7 8 9 10 J Q K A))))
+                                                       (hand hand))
+                                  collect (format nil "~A ~{~A~}" suit cards)))))
+
 ; pretty print for deal (result of deal-all function)
 (defun print-deal (hands &optional (names '(n e s w)))
     (loop for name in names
           for hand in hands
           do (format t "~A: ~A~%" name 
-                     (mapcar (curry #'mapcar (lambda (x) (nth x '(2 3 4 5 6 7 8 9 10 J Q K A))))
-                             (hand hand)))))
+                     (print-hand hand))))
 
 ;; ======================
 ;; DEALING CARDS
@@ -251,6 +270,13 @@
     (if (<= (length lst) 0) acc
         (let-from! (deal amount lst) (rest hand)
             (deal-all amount rest (cons hand acc)))))
+
+(defun remove-cards (cards deck)
+    (list cards
+          (remove-if (lambda (x) (find x cards :test #'equal)) deck)))
+
+(test (remove-cards '((S 2) (S 3) (S 10)) '((S 2) (S 3) (S 4) (S 10) (H 2) (H 11)))
+      '(((S 2) (S 3) (S 10)) ((S 4) (H 2) (H 11))) equal)
 
 (defun rank-hcp (rank)
     (if (> rank 8) (- rank 8) 0))
@@ -397,15 +423,15 @@
 (test (permut-weight '(0 0 0 0) '(0 3 0 0)) 0 eq)
 (test (permut-weight '(0 1 0 0) '(0 3 0 0)) 0 eq)
     
-(defun permut-for-kind (kind target division)
+(defun permut-for-kind (kind target division &key (max 13))
     (cond ((eq kind 'hcp) (let* ((figures (cdr division))
                                  (fig-supply (mapcar #'length figures))
                                  (fig-permuts (valid-hcp-sums target fig-supply))
                                  (fig-permut (randcar-weights 
                                                 (zip-weight (curry #'permut-weight fig-supply)
                                                             fig-permuts))))
-                              (cons (- 13 (apply #'+ fig-permut)) fig-permut)))
-          ((eq kind 'distribution) (if (= (apply #'+ target) 13) target
+                              (cons (- max (apply #'+ fig-permut)) fig-permut)))
+          ((eq kind 'distribution) (if (= (apply #'+ target) max) target
                                        (error 'wrong-distribution := target)))))
 
 (defun card-weight (hcp-dist suit-dist card)
@@ -422,7 +448,7 @@
         (let-from! (funcall getter source) (card rest)
             (take-many rest getter (- amount 1) (cons card acc)))))
 
-(defun gen-hand (hcp distrib &optional cards)
+(defun gen-hand* (hcp distrib &optional cards)
     (if (not cards) (setf cards (all-cards)))
     (let* ((division (cards-by #'card-hcp cards))
            (hcp-target (if hcp (permut-for-kind 'hcp hcp division)))
@@ -440,12 +466,12 @@
             (zip-deals (list (draw highcards (apply #'+ (cdr hcp-target)))
                              (draw (car division) (car hcp-target)))))))
                          
-(hand (car (gen-hand 15 '(4 3 3 3))))
+(hand (car (gen-hand* 15 '(4 3 3 3))))
 
-(defun gen-hand (target kind &optional cards)
+(defun gen-hand (target kind &key cards (max 13))
     (let* ((division (cards-by (classifier-for-kind kind) 
                                (or cards (all-cards))))
-           (permut (permut-for-kind kind target division)))
+           (permut (permut-for-kind kind target division :max max)))
         (if permut
             (zip-deals (loop for class in division
                              for amount in permut
@@ -529,8 +555,11 @@
           (lambda (hand)
              (sort (mapcar #'length (second (take trump hand))) #'<))))
 
+(defun suit-hcp (hand)
+    (apply #'+ (mapcar (lambda (lst) (apply #'+ (mapcar #'rank-hcp lst))) hand)))
+
 (defun suit-strength (hand)
-    (strength (apply #'+ (mapcar (lambda (lst) (apply #'+ (mapcar #'rank-hcp lst))) hand))))
+    (strength (suit-hcp hand)))
 
 (defun f-cons (&rest functions)
     (lambda (&rest input)
@@ -552,3 +581,28 @@
 (mc-case '(suit-strength suit-distribution) :first-hand '(gen-hand 18 'hcp))
 
 (mc-case (fit-n-distrib 0) :first-hand '(gen-hand '(5 3 3 2) 'distribution))
+
+(defun gen-suit (cards suit &key hcp len)
+    (if hcp (gen-hand hcp 'hcp :max len :cards (remove-if (lambda (c) (not (eq suit (car c)))) cards))
+            (deal len (remove-if (lambda (c) (not (eq suit (car c)))) cards)))) 
+    
+(defun gen-partner-deal (base hcp &rest rules)
+    (let ((starter (second (remove-cards (unhand base) (all-cards)))))
+         (let ((from-rules (zip-deals (loop for rule in rules
+                                            collect (apply #'gen-suit (cons starter rule))))))
+              (let ((beyond-rules (gen-hand hcp 'hcp 
+                                            :max (- 13 (length (second from-rules)))
+                                            :cards (remove-if (lambda (c) (find (first c) 
+                                                                          (mapcar #'first rules)))
+                                                              starter))))
+                   (let ((partner (zip-deals (list beyond-rules from-rules))))
+                       (append (list (unhand base)(second partner))
+                               (deal-all 13 (first partner))))))))
+
+                    
+
+(print-deal (gen-partner-deal '((9 8 3 2) (A 7 5) (A 9 7 5) (10 A))
+                              9 '(H :hcp 3 :len 5))
+            '(me p o1 o2))
+             
+
