@@ -221,7 +221,7 @@
                                   for cards in (mapcar (curry #'mapcar (lambda (x) 
                                                                 (nth x '(2 3 4 5 6 7 8 9 10 J Q K A))))
                                                        (mapcar (lambda (s) (sort s #'>))
-                                                               (hand hand)))
+                                                               hand))
                                   collect (format nil "~A ~{~A~}" suit cards)))))
 
 ; pretty print for deal (result of deal-all function)
@@ -482,10 +482,10 @@
                              collect (deal amount class))))))
 
 (let-from! (gen-hand 11 'hcp) (rest n)
-    (print-deal (deal-all 13 rest (list n))))
+    (print-deal (mapcar #'hand (deal-all 13 rest (list n)))))
 
 (let-from! (gen-hand '(5 2 2 4) 'distribution) (rest n)
-    (print-deal (deal-all 13 rest (list n))))
+    (print-deal (mapcar #'hand (deal-all 13 rest (list n)))))
 
 ;======================================
 ; Monte-carlo deals & reporting stats
@@ -746,11 +746,11 @@
           (() (9 10) (2 4 8 11) (4 9 10)))
       equal)
 
-(let-from! (peek (gen-partner-deal '((9 8 3 2) (A 7 5) (A 9 7 5) (10 A))
+(let-from! (mapcar #'hand (gen-partner-deal '((9 8 3 2) (A 7 5) (A 9 7 5) (10 A))
                              9 '(H :hcp 3 :len 5)))
         (me partner left right)
     (print-deal (list me left partner right) '(declarer left partner right))
-    (format t "IL: ~A~%" (car (immediate-loosers 'H (hand partner) (hand left) (hand me) (hand right)))))
+    (format t "IL: ~A~%" (car (immediate-loosers 'H partner left me right))))
 
 (defun deal-mc (trump hands &key (volume 2500))
     (histogram
