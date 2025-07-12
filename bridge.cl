@@ -54,7 +54,7 @@
     
 (defmacro peek (body)
     `(let ((ans ,body))
-        (format T "> ~A = ~A~%" ',body ans)
+        (format T "> ~A~%  = ~A~%" ',body ans)
         ans))
         
 (defun filter (pred lst &optional acc)
@@ -220,7 +220,8 @@
                             (loop for suit in '("♣" "♦" "♥" "♠")
                                   for cards in (mapcar (curry #'mapcar (lambda (x) 
                                                                 (nth x '(2 3 4 5 6 7 8 9 10 J Q K A))))
-                                                       (hand hand))
+                                                       (mapcar (lambda (s) (sort s #'>))
+                                                               (hand hand)))
                                   collect (format nil "~A ~{~A~}" suit cards)))))
 
 ; pretty print for deal (result of deal-all function)
@@ -284,8 +285,11 @@
 (defun card-hcp (card)
     (rank-hcp (second card)))
 
+(defun suitno (suitsym) 
+    (position suitsym '(c d h s)))
+
 (defun card-suitno (card)
-    (position (car card) '(c d h s)))
+    (suitno (car card)))
 
 (defun cards-by (classifier rest &optional acc)
     (if rest
@@ -566,17 +570,17 @@
         (mapcar (lambda (f) (apply f input))
                 functions)))
 
-(defun mc-case (measures &key (volume 2500) first-hand)
+(defun mc-case (measures &key (volume 2500) first-hand deal)
     (merge-by #'histmerge
         (histogram
             (apply #'append
                 (loop for i from 0 to volume
                       collect (mapcar (apply #'f-cons measures)
                                       (mapcar #'hand
-                                              (if first-hand
-                                                  (let-from! (eval first-hand) (rest)
-                                                      (deal-all 13 rest))
-                                                  (deal-all 13 (all-cards))))))))))
+                                              (cond (first-hand (let-from! (eval first-hand) (rest)
+                                                                    (deal-all 13 rest)))
+                                                    (deal (eval deal))
+                                                    (t (deal-all 13 (all-cards)))))))))))
 
 (mc-case '(suit-strength suit-distribution) :first-hand '(gen-hand 18 'hcp))
 
@@ -599,10 +603,159 @@
                        (append (list (unhand base)(second partner))
                                (deal-all 13 (first partner))))))))
 
-                    
+;; Test  deal
+;; Declarer: ♣ QJ7 ♦ QJ ♥ K10642 ♠ QJ6
+;; Dummy: ♣ 9832 ♦ A75 ♥ A975 ♠ A10
+;; Left: ♣ AK54 ♦ K643 ♥ J8 ♠ 532
+;; Right: ♣ 106 ♦ 10982 ♥ Q3 ♠ K9874
 
-(print-deal (gen-partner-deal '((9 8 3 2) (A 7 5) (A 9 7 5) (10 A))
-                              9 '(H :hcp 3 :len 5))
-            '(me p o1 o2))
-             
+;; I need a simplified approach for start. Let's identify immediate loosers:
+;; ♣AKx -> ruff. 
 
+(defun non-nil (x)
+    (if (not x) nil T))
+
+(defun play-low (suit hand)
+    (let ((played (car (nth (suitno suit) hand))))
+        (if played (loop for s in '(c d h s)
+                         for cards in hand
+                         collect (if (eq suit s) (cdr cards)
+                                                 cards)))))
+
+(defun play-high (suit hand)
+    (let ((played (car (nth (suitno suit) hand))))
+        (if played (loop for s in '(c d h s)
+                         for cards in hand
+                         collect (if (eq suit s) (subseq cards 0 (- (length cards) 1))
+                                                 cards)))))
+
+(test (play-low 'S '((1 2 10) (4 5 6) NIL (0 2 11 12)))
+      '((1 2 10) (4 5 6) NIL (2 11 12))
+      equal)
+
+(defun lastcar (x)
+    (car (last x)))
+
+(defun find-suit (test leader left partner right)
+    (find-if #'non-nil (loop for suit in '(c d h s)
+                             for op1 in left
+                             for op2 in right
+                             for l in leader
+                             for p in partner
+                             collect (and (apply test (list suit l op1 p op2))
+                                          suit))))
+
+(defun choose-void (trump leader left partner right)
+    (let* ((void (find-suit (lambda (suit l op1 p op2)
+                               (and l op1 op2 
+                                        (not (let ((lc (lastcar l))
+                                                   (c1 (lastcar op1))
+                                                   (c2 (lastcar op2)))
+                                                (and (> lc c1)
+                                                     (> lc c2))))
+                                        (nth (suitno trump) partner)
+                                        (not p) 
+                                        (not (eq suit trump))))
+                            leader left partner right)))
+        (if void (list (play-low void leader)
+                       (play-low void left)
+                       (play-low trump partner)
+                       (play-low void right)))))
+         
+(test (choose-void 'S '((6 7) (1 2 4 11) (6 9) (0 1 3))
+                      '((11 12) (3 5 12) (3 5 7 12) (8 12))
+                      '(() (0 6 7 8) (1 10) (2 5 6 7 11))
+                      '((10) (9 10) (0 2 4 8 11) (4 9 10)))
+      '(((7) (1 2 4 11) (6 9) (0 1 3))
+        ((12) (3 5 12) (3 5 7 12) (8 12))
+        (() (0 6 7 8) (1 10) (5 6 7 11))
+        (() (9 10) (0 2 4 8 11) (4 9 10)))
+        equal)
+         
+(test (choose-void 'H '((6 7) (3 5 12) (3 5 7 12) (8 12))
+                      '((2 3) (1 2 4 11) (6 9) (0 1 3))
+                      '(NIL (0 6 7 8) (1 10) (2 5 6 7 11))
+                      '((10) (9 10) (0 2 4 8 11) (4 9 10)))
+      '(((7) (3 5 12) (3 5 7 12) (8 12))
+        ((3) (1 2 4 11) (6 9) (0 1 3))
+        (NIL (0 6 7 8) (10) (2 5 6 7 11))
+        (NIL (9 10) (0 2 4 8 11) (4 9 10)))
+      equal)
+
+; Don't choose void if you can take otherwise in that suit
+(test (choose-void 'H '((7 12) (1 2 4 11) (6 9) (0 1 3))
+                      '((6 11) (3 5 12) (3 5 7 12) (8 12))
+                      '(() (0 6 7 8) (1 10) (2 5 6 7 11))
+                      '((10) (9 10) (0 2 4 8 11) (4 9 10)))
+        '()
+        equal)
+
+(defun choose-high-card (trump leader left partner right)
+    (let* ((high (find-suit (lambda (suit l op1 p op2)
+                                (and l op1 op2 suit
+                                     (let ((lc (lastcar l))
+                                           (c1 (lastcar op1))
+                                           (c2 (lastcar op2))
+                                           (pc (lastcar p)))
+                                         (or (and (> lc c1) (> lc c2))
+                                             (and pc (> pc c1) (> pc c2))))))
+                            leader left partner right)))
+        (if high (if (let ((lc (lastcar (nth (suitno high) leader)))
+                           (pc (lastcar (nth (suitno high) partner))))
+                         (or (not pc) (> lc pc)))
+                     (list (play-high high leader)
+                           (play-low high left)
+                           (or (play-low high partner) ;partner may drop non-trump
+                               (play-low (find-if #'non-nil (loop for suit in '(c d h s)
+                                                                  for suitno from 0 to 3
+                                                                  collect (and (not (eq suit trump))
+                                                                               (nth suitno partner)
+                                                                               suit)))
+                                         partner))
+                           (play-low high right))
+                     (list (play-low high leader)
+                           (play-low high left)
+                           (play-high high partner)
+                           (play-low high right))))))
+
+(test (choose-high-card 'H '((7 12) (1 2 4 11) (6 9) (0 1 3))
+                           '((6 11) (3 5 12) (3 5 7 12) (8 12))
+                           '(() (0 6 7 8) (1 10) (2 5 6 7 11))
+                           '((10) (9 10) (0 2 4 8 11) (4 9 10)))
+        '(((7) (1 2 4 11) (6 9) (0 1 3))
+          ((11) (3 5 12) (3 5 7 12) (8 12))
+          (() (6 7 8) (1 10) (2 5 6 7 11))
+          (() (9 10) (0 2 4 8 11) (4 9 10)))
+        equal)
+
+(defun immediate-loosers (trump declarer left dummy right &optional (taken 0))
+    (let-from! (or (choose-void trump left dummy right declarer)
+                   (choose-high-card trump left dummy right declarer))
+               (left-left left-dummy left-right left-declarer)
+        (if (not left-left) (list taken declarer left dummy right)
+            (apply #'immediate-loosers (list trump left-declarer left-left
+                                             left-dummy left-right (+ taken 1))))))
+
+(test (immediate-loosers 'H '((0 1 6 7) (3 5 12) (3 5 7 12) (8 12))
+                            '((2 3 11 12) (1 2 4 11) (6 9) (0 1 3))
+                            '((4 8 10) (0 6 7 8) (1 10) (2 5 6 7 11))
+                            '((5 9) (9 10) (0 2 4 8 11) (4 9 10)))
+      '(3 ((7) (3 5 12) (3 5 7 12) (8 12))
+          ((3) (1 2 4 11) (6 9) (0 1 3))
+          (() (0 6 7 8) (1 10) (2 5 6 7 11))
+          (() (9 10) (2 4 8 11) (4 9 10)))
+      equal)
+
+(let-from! (peek (gen-partner-deal '((9 8 3 2) (A 7 5) (A 9 7 5) (10 A))
+                             9 '(H :hcp 3 :len 5)))
+        (me partner left right)
+    (print-deal (list me left partner right) '(declarer left partner right))
+    (format t "IL: ~A~%" (car (immediate-loosers 'H (hand partner) (hand left) (hand me) (hand right)))))
+
+(defun deal-mc (trump hands &key (volume 2500))
+    (histogram
+        (loop for i from 0 to volume
+              collect (car (apply #'immediate-loosers (cons trump (mapcar #'hand (eval hands))))))))
+
+(peek (deal-mc 'h '(gen-partner-deal '((9 8 3 2) (A 7 5) (A 9 7 5) (10 A))
+                              9 '(H :hcp 3 :len 5))))
