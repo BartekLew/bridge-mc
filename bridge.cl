@@ -66,7 +66,23 @@
     (lambda (&rest args)
         (apply fun (append base-args args))))
 
+(defun f* (&rest funs)
+    (lambda (&rest args)
+        (let ((ans nil))
+            (loop for f in funs
+                  do (setf ans (if ans (funcall f ans)
+                                   (apply f args))))
+            ans)))
+
 (test (filter (curry #'< 3) '(1 2 3 4 5 4 3 2 1)) '(4 5 4) equal)
+
+(defun reorder (lst indexes)
+    (loop for i in indexes
+          collect (nth i lst)))
+
+(test (reorder '(5 10 15 21) '(3 0 1))
+      '(21 5 10)
+      equal)
 
 (defun push-pos (lst pos element)
     (loop for i from 0 to (max (- (length lst) 1) pos)
@@ -220,7 +236,7 @@
                             (loop for suit in '("♣" "♦" "♥" "♠")
                                   for cards in (mapcar (curry #'mapcar (lambda (x) 
                                                                 (nth x '(2 3 4 5 6 7 8 9 10 J Q K A))))
-                                                       (mapcar (lambda (s) (sort s #'>))
+                                                       (mapcar (lambda (s) (sort (copy-list s) #'>))
                                                                hand))
                                   collect (format nil "~A ~{~A~}" suit cards)))))
 
@@ -752,10 +768,24 @@
     (print-deal (list me left partner right) '(declarer left partner right))
     (format t "IL: ~A~%" (car (immediate-loosers 'H partner left me right))))
 
-(defun deal-mc (trump hands &key (volume 2500))
+(defun dump-chosen (fn test printer)
+    (lambda (&rest args)
+        (let ((ans (apply fn args)))
+            (if (funcall test ans)
+                (if printer (funcall printer args ans)
+                    (format t "~A(~A) -> ~A" fn args ans)))
+            ans)))
+
+(defun deal-mc (trump hands &key (volume 25000) eval-fn)
     (histogram
         (loop for i from 0 to volume
-              collect (car (apply #'immediate-loosers (cons trump (mapcar #'hand (eval hands))))))))
+              collect (car (apply eval-fn (cons trump (mapcar #'hand (eval hands))))))))
 
-(peek (deal-mc 'h '(gen-partner-deal '((9 8 3 2) (A 7 5) (A 9 7 5) (10 A))
-                              9 '(H :hcp 3 :len 5))))
+(deal-mc 'h '(reorder (gen-partner-deal '((9 8 3 2) (A 7 5) (A 9 7 5) (10 A))
+                                        9 '(H :hcp 3 :len 5))
+                      '(1 2 0 3))
+            :eval-fn (dump-chosen #'immediate-loosers
+                                 (f* #'first (curry #'= 0))
+                                 (lambda (args ans)
+                                     (if (not (find 12 (car (car (cdr args)))))
+                                         (print-deal (cdr args) '(p left me right))))))
