@@ -177,6 +177,34 @@
                                        (self tail (- tg head) (+ i 1))))))
                 (self weights target 0)))))
 
+(defun roll (amount lst)
+    (let ((a (mod (- amount) (length lst))))
+        (if (= a 0) lst
+            (append (subseq lst a) (subseq lst 0 a)))))
+
+(test (roll 2 '(10 100 15 5))
+      '(15 5 10 100)
+      equal)
+
+(test (roll -1 '(10 100 15 5))
+      '(100 15 5 10)
+      equal)
+
+(test (roll 3 '(10 100 15 5))
+      '(100 15 5 10)
+      equal)
+
+(test (roll -3 '(10 100 15 5))
+      '(5 10 100 15)
+      equal)
+
+(defun xor (a b)
+    (or (and a (not b)) (and (not a) b)))
+
+(test (xor T nil) T eq)
+(test (xor nil T) T eq)
+(test (xor T T) nil eq)
+(test (xor nil nil) nil eq)
 ;; ===========================
 ;; Cards and printing them
 ;; ===========================
@@ -797,7 +825,8 @@
         (if high (if (let ((lc (lastcar (nth (suitno high) leader)))
                            (pc (lastcar (nth (suitno high) partner))))
                          (or (not pc) (> lc pc)))
-                     (list (play-high high leader)
+                     (list NIL
+                           (play-high high leader)
                            (play-low high left)
                            (or (play-low high partner) ;partner may drop non-trump
                                (play-low (find-if #'non-nil (loop for suit in '(c d h s)
@@ -807,7 +836,8 @@
                                                                                suit)))
                                          partner))
                            (play-low high right))
-                     (list (play-low high leader)
+                     (list T
+                           (play-low high leader)
                            (play-low high left)
                            (play-high high partner)
                            (play-low high right))))))
@@ -816,19 +846,50 @@
                            '((6 11) (3 5 12) (3 5 7 12) (8 12))
                            '(() (0 6 7 8) (1 10) (2 5 6 7 11))
                            '((10) (9 10) (0 2 4 8 11) (4 9 10)))
-        '(((7) (1 2 4 11) (6 9) (0 1 3))
-          ((11) (3 5 12) (3 5 7 12) (8 12))
-          (() (6 7 8) (1 10) (2 5 6 7 11))
-          (() (9 10) (0 2 4 8 11) (4 9 10)))
+        '(NIL ((7) (1 2 4 11) (6 9) (0 1 3))
+              ((11) (3 5 12) (3 5 7 12) (8 12))
+              (() (6 7 8) (1 10) (2 5 6 7 11))
+              (() (9 10) (0 2 4 8 11) (4 9 10)))
         equal)
 
-(defun immediate-loosers (trump declarer left dummy right &optional (taken 0))
-    (let-from! (or (choose-void trump left dummy right declarer)
-                   (choose-high-card trump left dummy right declarer))
-               (left-left left-dummy left-right left-declarer)
-        (if (not left-left) (list taken declarer left dummy right)
+(test (choose-high-card 'H '((7) (0 1 2 4 11) (6 9) (0 1 3))
+                           '((6 11) (3 5 12) (3 5 7 12) (8 12))
+                           '((12) (6 7 8) (1 10) (2 5 6 7 11))
+                           '((10) (9 10) (0 2 4 8 11) (4 9 10)))
+        '(T (() (0 1 2 4 11) (6 9) (0 1 3))
+            ((11) (3 5 12) (3 5 7 12) (8 12))
+            (() (6 7 8) (1 10) (2 5 6 7 11))
+            (() (9 10) (0 2 4 8 11) (4 9 10)))
+        equal)
+
+(defun invert-if-needed (lst)
+    (letcar lst
+        (if head (cons head (roll 2 tail))
+            lst)))
+
+(test (invert-if-needed '(T 1 2 3 4))
+     '(T 3 4 1 2)
+     equal)
+
+(test (invert-if-needed '(nil 1 2 3 4))
+     '(nil 1 2 3 4)
+     equal)
+
+(test (invert-if-needed nil)
+     nil
+     equal)
+
+(defun immediate-loosers (trump declarer left dummy right &optional (taken 0) inverted)
+    (let-from! (invert-if-needed (or (let ((v (choose-void trump left dummy right declarer)))
+                                        (if v (cons T v)))
+                                     (choose-high-card trump left dummy right declarer)))
+               (new-inverted left-left left-dummy left-right left-declarer)
+        (if (not left-left) (if inverted (list taken dummy right declarer left)
+                                         (list taken declarer left dummy right))
             (apply #'immediate-loosers (list trump left-declarer left-left
-                                             left-dummy left-right (+ taken 1))))))
+                                             left-dummy left-right 
+                                             (+ taken 1)
+                                             (xor inverted new-inverted))))))
 
 (test (immediate-loosers 'H '((0 1 6 7) (3 5 12) (3 5 7 12) (8 12))
                             '((2 3 11 12) (1 2 4 11) (6 9) (0 1 3))
@@ -841,15 +902,14 @@
       equal)
 
 
-;; TODO: Implement taking from other hand!
 (test (immediate-loosers 'C '((0 9 11) (2 7 9) (5 8 11) (5 9 10 11)) 
                             '((4 6) (1) (0 1 2 9 10 12) (1 2 4 7))
                             '((2 3 5 7 8 12) (0 3 6 11) (3 7) (0))
                             '((1 10) (4 5 8 10 12) (4 6) (3 6 8 12)))
-      '(4 ((0 9 11) (9) (8 11) (9 10 11)) 
-          ((6) () (0 1 2 9 10) (2 4 7))
+      '(5 ((0 9 11) () (8 11) (9 10 11)) 
+          (() () (0 1 2 9 10) (2 4 7))
           ((2 3 5 7 8 12) (11) (7) ())
-          ((1 10) (5 8 10) (6) (3 6 8)))
+          ((1 10) (8 10) (6) (3 6 8)))
       equal)
 
 (test (immediate-loosers 'H '((4 6) (1) (0 1 2 9 10 12) (1 2 4 7))
