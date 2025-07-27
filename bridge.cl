@@ -922,6 +922,59 @@
           ((3 5 7 8) (0 3 6 11) (3 7) (0)))
       equal)
 
+(defun finesse-if-possible (suit high h1 h2)
+    (let* ((h2-max (or (apply #'max? (nth (suitno suit) h2)) 0))
+           (h1-min (fold (lambda (acc val) (if (and (> (second val) h2-max)
+                                                    (> (second val) (or high 0))
+                                                    (< (second val) (or (second acc) 13)))
+                                               val acc))
+                         nil
+                         (zip-id (nth (suitno suit) h1)))))
+          (if h1-min (list (second h1-min) 
+                           (loop for s in '(c d h s)
+                                 for cards in h1
+                                 collect (if (eq s suit) 
+                                             (append (subseq cards 0 (first h1-min))
+                                                     (subseq cards (+ (first h1-min) 1)))
+                                             cards)))
+                     (beat-or-low suit (max (or (second (reverse (nth (suitno suit) h2))) 0) (or high 0)) 
+                                  h1))))
+
+(test (finesse-if-possible 'H nil '((4 6) (1) (0 1 2 9 10 12) (1 2 4 7))
+                                  '((2 3 5 7 8 12) (0 3 6 11) (3 7) (0)))
+      '(9 ((4 6) (1) (0 1 2 10 12) (1 2 4 7)))
+      equal)
+
+(test (finesse-if-possible 'H 8 '((4 6) (1) (0 1 2 9 12) (1 2 4 7))
+                                '((2 3 5 7 8 12) (0 3 6 11) (7) (0)))
+      '(9 ((4 6) (1) (0 1 2 12) (1 2 4 7)))
+      equal)
+      
+(test (finesse-if-possible 'D 6 '((1 10) (4 5 8 10 12) (4 6) (3 6 8 12))
+                                '((0 9 11) (2 7 9) (5 8 11) (5 9 10 11)))
+      '(10 ((1 10) (4 5 8 12) (4 6) (3 6 8 12)))
+      equal)
+
+(test (finesse-if-possible 'D nil '((1 10) (4 5 8 12) (4 6) (3 6 8 12))
+                                  '((0 9 11) (7 9) (5 8 11) (5 9 10 11)))
+      '(12 ((1 10) (4 5 8) (4 6) (3 6 8 12)))
+      equal)
+
+(test (finesse-if-possible 'D nil '((1 10) (4 5 8 11) (4 6) (3 6 8 12))
+                                  '((0 9 11) (7 12) (5 8 11) (5 9 10 11)))
+      '(8 ((1 10) (4 5 11) (4 6) (3 6 8 12)))
+      equal)
+
+(test (finesse-if-possible 'D 10 '((1 10) (4 5 8 11) (4 6) (3 6 8 12))
+                                  '((0 9 11) (7 12) (5 8 11) (5 9 10 11)))
+      '(11 ((1 10) (4 5 8) (4 6) (3 6 8 12)))
+      equal)
+
+(test (finesse-if-possible 'D 10 '((1 10) (4 5 8 11) (4 6) (3 6 8 12))
+                                  '((0 9 11) () (5 8 11) (5 9 10 11)))
+      '(11 ((1 10) (4 5 8) (4 6) (3 6 8 12)))
+      equal)
+
 (defun play-round (suit dealer left dummy right)
     (let ((dummy-max (apply #'max? (nth (suitno suit) dummy)))
           (dealer-max (apply #'max? (nth (suitno suit) dealer))))
@@ -945,14 +998,14 @@
               ((> dealer-max dummy-max)
                (let* ((h1 (play-low suit dummy))
                       (h2 (beat-or-low suit 13 right))
-                      (h3 (beat-or-low suit (or (car h2) 0) dealer :use-highest T))
+                      (h3 (finesse-if-possible suit (car h2) dealer left))
                       (h4 (beat-or-low suit (car h3) left)))
                    (list (if (> (car h3) (or (car h4) 0)) 1 -1)
                          (second h3) (second h4) h1 (second h2))))
               (t
                (let* ((h1 (play-low suit dealer))
                       (h2 (beat-or-low suit 13 left))
-                      (h3 (beat-or-low suit (or (car h2) 0) dummy :use-highest T))
+                      (h3 (finesse-if-possible suit (car h2) dummy right))
                       (h4 (beat-or-low suit (car h3) right)))
                    (list (if (> (car h3) (or (car h4) 0)) 1 -1)
                          h1 (second h2) (second h3) (second h4)))))))
@@ -973,7 +1026,7 @@
                      '((5 9) (10) (0 2 4 8 11) (4 9 10)))
       '(-1 ((0 1 6 7) (5) (3 5 7 12) (8 12))
            ((2 3 11 12) (4 11) (6 9) (0 1 3))
-           ((4 8 10) (6 7) (1 10) (2 5 6 7 11))   
+           ((4 8 10) (7 8) (1 10) (2 5 6 7 11))   
            ((5 9) () (0 2 4 8 11) (4 9 10)))
       equal)
 
@@ -1003,8 +1056,18 @@
                      '((0 9 11) (2 7 9) (5 8 11) (9 10 11)))
       '(-1 ((4 6) (1) (0 1 2 9 10 12) (4 7)) 
            ((2 3 5 7 8 12) (3 6 11) (3 7) NIL)
-           ((1 10) (4 5 8 10 12) (4 6) (3 6))
+           ((1 10) (4 5 8 10 12) (4 6) (6 8))
            ((0 9 11) (2 7 9) (5 8 11) (10 11)))
+      equal)
+
+(test (PLAY-ROUND 'H '((2 3 5 7 8 12) (0 3 6 11) (3 7) NIL)
+                     '((1 10) (4 5 8 10 12) (6 11) (3 6 8))
+                     '((4 6) (1) (0 1 2 9 10 12) (2 4 7)) 
+                     '((0 9 11) (2 7 9) (4 5 8) (9 10 11)))
+      '(1 ((2 3 5 7 8 12) (0 3 6 11) (7) NIL)
+          ((1 10) (4 5 8 10 12) (11) (3 6 8))
+          ((4 6) (1) (0 1 2 10 12) (2 4 7)) 
+          ((0 9 11) (2 7 9) (5 8) (9 10 11)))
       equal)
 
 (defun untrump-balance (trump declarer left dummy right &optional (winers 0) (loosers 0))
@@ -1018,12 +1081,12 @@
             
 
 (test (untrump-balance 'S '((0 1 6 7) (3 5 12) (3 5 7 12) (8 12))
-                        '((2 3 11 12) (1 2 4 11) (6 9) (0 1 3))
-                        '((4 8 10) (0 6 7 8) (1 10) (2 5 6 7 11))
-                        '((5 9) (9 10) (0 2 4 8 11) (4 9 10)))
-      '((1 2) ((1 6 7) (3 5 12) (3 5 7 12) ())
+                          '((2 3 11 12) (1 2 4 11) (6 9) (0 1 3))
+                          '((4 8 10) (0 6 7 8) (1 10) (2 5 6 7 11))
+                          '((5 9) (9 10) (0 2 4 8 11) (4 9 10)))
+      '((0 3) ((1 6 7) (3 5 12) (3 5 7 12) ())
               ((2 3 11 12) (1 2 4 11) (6 9) ())
-              ((4 8 10) (0 6 7 8) (1 10) (5 6))
+              ((4 8 10) (0 6 7 8) (1 10) (6 7))
               ((5 9) (9 10) (0 2 4 8 11) ()))
       equal)
 
@@ -1037,7 +1100,6 @@
               (() (5 8 10) (6) (3 6 8)))
       equal)
 
-;; TODO: Implement finesse behaviour
 (test (untrump-balance 'H '((4 6) (1) (0 1 2 9 10 12) (1 2 4 7))
                         '((2 3 5 7 8 12) (0 3 6 11) (3 7) (0))
                         '((1 10) (4 5 8 10 12) (4 6) (3 6 8 12))
@@ -1048,7 +1110,7 @@
               ((0 9 11) (2 7 9) () (5 9 10 11)))
       equal)
 
-;; More probable spade contract is very sad when it comes to untrump:
+;; More probable EW spade contract is very sad when it comes to untrump:
 ;;N: ♣ KJ2 ♦ J94 ♥ K107 ♠ KQJ7
 ;;E: ♣ 86 ♦ 3 ♥ AQJ432 ♠ 9643
 ;;S: ♣ A109754 ♦ K852 ♥ 95 ♠ 2
@@ -1058,7 +1120,7 @@
                         '((2 3 5 7 8 12) (0 3 6 11) (3 7) (0))
                         '((1 10) (4 5 8 10 12) (4 6) (3 6 8 12))
                         '((0 9 11) (2 7 9) (5 8 11) (5 9 10 11)))
-      '((1 3) ((4 6) (1) (0 1 2 9 10 12) ())
+      '((3 1) ((4 6) (1) (0 1 2 9 10 12) ())
               ((5 7 8 12) (3 6 11) (3 7) ())
               ((1 10) (4 5 8 10 12) (4 6) ())
               ((0 9 11) (2 7 9) (5 8 11) ()))
@@ -1125,3 +1187,4 @@
                                         9 '(H :hcp 3 :len 5))
                       '(1 2 0 3))
              'untrump-balance 'immediate-loosers)
+
