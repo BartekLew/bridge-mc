@@ -722,8 +722,10 @@
 (defun print-hist (hist &optional (indent 0))
     (loop for entry in hist
           do (let-from* entry (val freq)
-                (format t "~A~A ~A~%" (repstr indent "    ")
-                                      val freq)
+                (format t "~A~A: ~A~%" (repstr indent "    ")
+                                      val (if (< freq 1/1000) (/ 1 (floor (/ (denominator freq)
+                                                                            (numerator freq))))
+                                              (format nil "~,2f%" (* freq 100))))
                 (if (nthcdr 2 entry) (print-hist (nthcdr 2 entry) (+ indent 1))))))
 
 (defun suit-distribution (hand)
