@@ -20,7 +20,10 @@
 (defun id (x) x)
 
 (defun car* (x)
-    (if (listp x) (car x) x))
+    (if (and (listp x) (= (length x) 1)) (car x) x))
+
+(defun ensure-list (x)
+    (if (listp x) x (list x)))
 
 (defmacro test (form result test)
   `(let ((ans ,form))
@@ -205,6 +208,66 @@
 (test (xor nil T) T eq)
 (test (xor T T) nil eq)
 (test (xor nil nil) nil eq)
+
+(defun flatten (lst)
+    (fold (lambda (acc val)
+              (if (listp val) (append acc val)
+                              (append acc (list val))))
+           nil lst))
+
+(test (flatten '(1 foo (bar baz) 4 5 (6 8)))
+      '(1 foo bar baz 4 5 6 8)
+      equal)
+
+(defun mod-or-push (mod init lst val &optional acc)
+    (if lst (let ((ans (funcall mod (car lst) val)))
+                (if ans (append acc (cons ans (cdr lst)))
+                        (mod-or-push mod init (cdr lst) val (append acc (list (car lst))))))
+            (append acc (list (funcall init val)))))
+
+(test (mod-or-push (lambda (ref x) (if (= ref x) (* x 2)))
+                   #'id
+                   '(1 4 5 6 10)
+                   1)
+      '(2 4 5 6 10)
+      equal)
+
+(test (mod-or-push (lambda (ref x) (if (= ref x) (* x 2)))
+                   #'id
+                   '(1 4 5 6 10)
+                   7)
+      '(1 4 5 6 10 7)
+      equal)
+
+(test (mod-or-push (lambda (ref x) (if (= ref x) (* x 2)))
+                   (lambda (x) `(,x 1))
+                   '() 1)
+      '((1 1)) equal)
+
+(test (fold (curry #'mod-or-push (lambda (ref x) (if (= (car ref) x) `(,x ,(+ (second ref) 1))))
+                                 (lambda (x) `(,x 1)))
+            nil
+            '(1 2 5 1 5 2 10))
+      '((1 2) (2 2) (5 2) (10 1))
+      equal)
+
+(defun getfork (a b &optional acc)
+    (cond ((or (not a) (not b)) (list acc a b))
+          ((equal (first a) (first b)) (getfork (cdr a) (cdr b) (append acc (list (car a)))))
+          (t (list acc a b))))
+ 
+(test (getfork '(a b 1 5) '(a b 6 5))
+     '((a b) (1 5) (6 5))
+     equal)
+
+(test (getfork '(a b c) '(d e f))
+      '(() (a b c) (d e f))
+      equal)
+
+(test (getfork '(a b c) '(a b c))
+      '((a b c) () ())
+      equal)
+
 ;; ===========================
 ;; Cards and printing them
 ;; ===========================
@@ -552,64 +615,116 @@
 ; Monte-carlo deals & reporting stats
 ;======================================
 
-(defun histogram (lists &optional acc (total 0))
-    (if (not lists) (mapcar (lambda (x) (list (first x) (float (/ (second x) total))))
-                            (sort acc (lambda (a b)
-                                          (> (second a) (second b)))))
-        (let ((p (position-if (lambda (x)
-                                (let-from* x (val)
-                                    (equal val (car lists))))
-                              acc)))
-            (histogram (cdr lists) 
-                       (if p (loop for i from 0
-                                   for x in acc
-                                   collect (list (car x) (if (= i p) (+ (second x) 1) (second x))))
-                             (cons (list (car lists) 1) acc))
-                       (+ total 1)))))
+(defun hist-base (vals &optional base)
+    (labels ((histmod (ref val)
+                (if (equal (first ref) val) (list val (+ (second ref) 1))))
+             (histinit (x) `(,x 1)))
+        (fold (curry #'mod-or-push #'histmod #'histinit)
+              base vals)))
+            
+(test (hist-base '(a b a d 4 5 f a 4))
+     '((a 3) (b 1) (d 1) (4 2) (5 1) (f 1))
+     equal)
 
-(defun merge-by (merger list &optional acc)
-    (if (not list) acc
-        (letcar list
-            (labels ((self (x lst &optional acc)
-                        (if lst (let ((merged (funcall merger x (car lst))))
-                                    (if merged (append acc (cons merged (cdr lst)))
-                                               (self x (cdr lst) (append acc (list (car lst)))))))))
-                (let ((newacc (self head acc)))
-                    (if newacc (merge-by merger tail newacc)
-                               (merge-by merger tail (cons head acc))))))))
+(test (hist-base '((a b) (a d) (a b) 4 5 f a 4))
+     '(((a b) 2) ((a d) 1) (4 2) (5 1) (f 1) (a 1))
+     equal)
 
-(defun histmerge (a b)
-    (if (and a b)
-        (let-from* a (aval afreq)
-            (let-from* b (bval bfreq bchildren)
-                (if bchildren
-                    (if (equal (car aval) bval)
-                        (list (car aval) (+ afreq bfreq)
-                              (cons (list (cdr aval) afreq) bchildren)))
-                    (if (equal (car aval) (car bval))
-                        (list (car aval) (+ afreq bfreq)
-                              (list (list (cdr aval) afreq) (list (cdr bval) bfreq)))))))))
+(test (hist-base '((a b) (a d) (a b) 4 5 f a 4) '((a 5) (4 8)))
+     '((a 6) (4 10) ((a b) 2) ((a d) 1) (5 1) (f 1))
+     equal)
 
-(test (histmerge '((a b c) 0.1) '(a 0.1 (((a b) 0.05)
-                                         ((c b) 0.05))))
-      '(A 0.2 (((B C) 0.1) ((A B) 0.05) ((C B) 0.05))) equal)
+(defun hist-breakdown (histogram)
+    (labels ((rebase (newbase basefreq vals)
+                (cond ((and newbase vals)
+                            (mapcar (lambda (x) (list (append (ensure-list newbase) 
+                                                              (ensure-list (first x))) 
+                                                      (second x)))
+                                    vals))
+                      (newbase `((,(car* newbase) ,basefreq)))
+                      (t vals)))
+             (brkmod (a b)
+                (if a
+                    (let-from* a (aval afreq achildren)
+                        (let-from* b (bval bfreq)
+                            (let-from! (getfork (ensure-list aval) (ensure-list bval)) 
+                                       (common arest brest)
+                                (cond ((not common) nil)
+                                      ((not (or arest brest))
+                                           (list aval (+ afreq bfreq)))
+                                      ((and (= (length arest) 0) (not achildren))
+                                         (list (car* common) (+ afreq bfreq)
+                                               `((nil ,afreq) (,(car* brest) ,bfreq))))
+                                      (t (list (car* common) (+ afreq bfreq)
+                                            (mod-or-push #'brkmod #'id 
+                                                         (rebase arest afreq achildren)
+                                                         (list (car* brest) bfreq))))))))))
+              
+              (self (hist &optional base)
+                (fold (curry #'mod-or-push #'brkmod #'id) base hist)))
 
-(test (histmerge '(((2 3 4 4) SUPPORT) 0.09506197)
-                 '(((2 3 4 4) OPEN) 0.06947221))
-      '((2 3 4 4) 0.16453418 (((SUPPORT) 0.09506197) ((OPEN) 0.06947221)))
+        (self histogram)))
+             
+(test (hist-breakdown '((a 6) (4 10) ((c d) 3) ((f 4) 3) ((a b) 2) ((a d) 1) (5 1) (f 1) ((c d) 3)))
+     '((a 9 ((nil 6) (b 2) (d 1)))
+       (4 10) 
+       ((c d) 6)
+       (f 4 ((4 3) (nil 1))) 
+       (5 1))
+     equal)
+
+(test (hist-breakdown '(((4 5 15 'foo) 2) ((5 4 15 'bar) 4) ((4 7 15 'bar) 9) ((4 5 7 'baz) 1)))
+     '((4 12 ((5 3 (((15 'FOO) 2) 
+                    ((7 'BAZ) 1)))
+              ((7 15 'BAR) 9)))
+       ((5 4 15 'BAR) 4))
+     equal)
+
+(defun hist-percent (histogram)
+    (let ((total (fold #'+ 0 (mapcar #'second histogram))))
+        (sort (mapcar (lambda (entry) 
+                        (let-from* entry (val freq children)
+                            (let ((head (list val (/ freq total))))
+                                (if children (append head (hist-percent children))
+                                             head))))
+                     histogram)
+              (lambda (a b) (> (second a) (second b))) )))
+            
+
+(test (hist-percent '((4 12 ((5 3 (((15 'FOO) 2) 
+                                   ((7 'BAZ) 1)))
+                             ((7 15 'BAR) 9)))
+                      ((5 4 15 'BAR) 4)))
+      '((4 3/4 ((7 15 'BAR) 3/4)
+               (5 1/4 ((15 'FOO) 2/3) 
+                      ((7 'BAZ) 1/3)))
+        ((5 4 15 'BAR) 1/4))
       equal)
 
-(test (histmerge '(((2 3 4 4) EMPTY) 0.04818073)
-                 '((2 3 4 4) 0.16453418 (((SUPPORT) 0.09506197)((OPEN) 0.06947221))))
-      '((2 3 4 4) 0.21271491
-         (((EMPTY) 0.04818073) ((SUPPORT) 0.09506197) ((OPEN) 0.06947221)))
-      equal)
+(defun histogram (data)
+    (hist-percent (hist-breakdown (hist-base data))))
 
+(test (histogram '(a b 12 15 (a b) (c b) c c a 15 (a b c)))
+    '((A 4/11 (NIL 1/2) 
+              (B 1/2 (NIL 1/2) (C 1/2)))
+      (C 3/11 (NIL 2/3) 
+              (B 1/3))
+      (15 2/11)
+      (B 1/11)
+      (12 1/11))
+     equal)
 
-(test (merge-by #'histmerge '(((a b c) 0.7)
-                              ((a b d) 0.3)
-                              ((c d f) 0.1)))
-      '(((C D F) 0.1) (A 1.0 (((B D) 0.3) ((B C) 0.7)))) equal)
+(defun repstr (n str)
+    (apply (curry #'concatenate 'string)
+           (loop for i from 1 to n
+                 collect str)))
+
+(defun print-hist (hist &optional (indent 0))
+    (loop for entry in hist
+          do (let-from* entry (val freq)
+                (format t "~A~A ~A~%" (repstr indent "    ")
+                                      val freq)
+                (if (nthcdr 2 entry) (print-hist (nthcdr 2 entry) (+ indent 1))))))
 
 (defun suit-distribution (hand)
     (sort (mapcar #'length hand) #'<))
@@ -632,16 +747,15 @@
                 functions)))
 
 (defun mc-case (measures &key (volume 2500) first-hand deal)
-    (merge-by #'histmerge
-        (histogram
-            (apply #'append
-                (loop for i from 0 to volume
-                      collect (mapcar (apply #'f-cons measures)
-                                      (mapcar #'hand
-                                              (cond (first-hand (let-from! (eval first-hand) (rest)
-                                                                    (deal-all 13 rest)))
-                                                    (deal (eval deal))
-                                                    (t (deal-all 13 (all-cards)))))))))))
+    (histogram
+        (apply #'append
+            (loop for i from 0 to volume
+                  collect (mapcar (apply #'f-cons measures)
+                                  (mapcar #'hand
+                                          (cond (first-hand (let-from! (eval first-hand) (rest)
+                                                                (deal-all 13 rest)))
+                                                (deal (eval deal))
+                                                (t (deal-all 13 (all-cards))))))))))
 
 (mc-case '(suit-strength suit-distribution) :first-hand '(gen-hand 18 'hcp))
 
@@ -681,20 +795,20 @@
 
 (defun play-low (suit hand)
     (let ((played (car (nth (suitno suit) hand))))
-        (if played (loop for s in '(c d h s)
-                         for cards in hand
-                         collect (if (eq suit s) (cdr cards)
-                                                 cards)))))
+        (if played (list played (loop for s in '(c d h s)
+                                      for cards in hand
+                                       collect (if (eq suit s) (cdr cards)
+                                                   cards))))))
 
 (defun play-high (suit hand)
     (let ((played (car (nth (suitno suit) hand))))
-        (if played (loop for s in '(c d h s)
-                         for cards in hand
-                         collect (if (eq suit s) (subseq cards 0 (- (length cards) 1))
-                                                 cards)))))
+        (if played (list played (loop for s in '(c d h s)
+                                      for cards in hand
+                                      collect (if (eq suit s) (subseq cards 0 (- (length cards) 1))
+                                                  cards))))))
 
 (test (play-low 'S '((1 2 10) (4 5 6) NIL (0 2 11 12)))
-      '((1 2 10) (4 5 6) NIL (2 11 12))
+      '(0 ((1 2 10) (4 5 6) NIL (2 11 12)))
       equal)
 
 (defun take-higher (cards high &key use-highest)
@@ -779,10 +893,10 @@
                                         (not p) 
                                         (not (eq suit trump))))
                             leader left partner right)))
-        (if void (list (play-low void leader)
-                       (play-low void left)
-                       (play-low trump partner)
-                       (play-low void right)))))
+        (if void (list (second (play-low void leader))
+                       (second (play-low void left))
+                       (second (play-low trump partner))
+                       (second (play-low void right))))))
          
 (test (choose-void 'S '((6 7) (1 2 4 11) (6 9) (0 1 3))
                       '((11 12) (3 5 12) (3 5 7 12) (8 12))
@@ -811,116 +925,6 @@
                       '((10) (9 10) (0 2 4 8 11) (4 9 10)))
         '()
         equal)
-
-(defun choose-high-card (trump leader left partner right)
-    (let* ((high (find-suit (lambda (suit l op1 p op2)
-                                (and l op1 op2 suit
-                                     (let ((lc (lastcar l))
-                                           (c1 (lastcar op1))
-                                           (c2 (lastcar op2))
-                                           (pc (lastcar p)))
-                                         (or (and (> lc c1) (> lc c2))
-                                             (and pc (> pc c1) (> pc c2))))))
-                            leader left partner right)))
-        (if high (if (let ((lc (lastcar (nth (suitno high) leader)))
-                           (pc (lastcar (nth (suitno high) partner))))
-                         (or (not pc) (> lc pc)))
-                     (list NIL
-                           (play-high high leader)
-                           (play-low high left)
-                           (or (play-low high partner) ;partner may drop non-trump
-                               (play-low (find-if #'non-nil (loop for suit in '(c d h s)
-                                                                  for suitno from 0 to 3
-                                                                  collect (and (not (eq suit trump))
-                                                                               (nth suitno partner)
-                                                                               suit)))
-                                         partner))
-                           (play-low high right))
-                     (list T
-                           (play-low high leader)
-                           (play-low high left)
-                           (play-high high partner)
-                           (play-low high right))))))
-
-(test (choose-high-card 'H '((7 12) (1 2 4 11) (6 9) (0 1 3))
-                           '((6 11) (3 5 12) (3 5 7 12) (8 12))
-                           '(() (0 6 7 8) (1 10) (2 5 6 7 11))
-                           '((10) (9 10) (0 2 4 8 11) (4 9 10)))
-        '(NIL ((7) (1 2 4 11) (6 9) (0 1 3))
-              ((11) (3 5 12) (3 5 7 12) (8 12))
-              (() (6 7 8) (1 10) (2 5 6 7 11))
-              (() (9 10) (0 2 4 8 11) (4 9 10)))
-        equal)
-
-(test (choose-high-card 'H '((7) (0 1 2 4 11) (6 9) (0 1 3))
-                           '((6 11) (3 5 12) (3 5 7 12) (8 12))
-                           '((12) (6 7 8) (1 10) (2 5 6 7 11))
-                           '((10) (9 10) (0 2 4 8 11) (4 9 10)))
-        '(T (() (0 1 2 4 11) (6 9) (0 1 3))
-            ((11) (3 5 12) (3 5 7 12) (8 12))
-            (() (6 7 8) (1 10) (2 5 6 7 11))
-            (() (9 10) (0 2 4 8 11) (4 9 10)))
-        equal)
-
-(defun invert-if-needed (lst)
-    (letcar lst
-        (if head (cons head (roll 2 tail))
-            lst)))
-
-(test (invert-if-needed '(T 1 2 3 4))
-     '(T 3 4 1 2)
-     equal)
-
-(test (invert-if-needed '(nil 1 2 3 4))
-     '(nil 1 2 3 4)
-     equal)
-
-(test (invert-if-needed nil)
-     nil
-     equal)
-
-(defun immediate-loosers (trump declarer left dummy right &optional (taken 0) inverted)
-    (let-from! (invert-if-needed (or (let ((v (choose-void trump left dummy right declarer)))
-                                        (if v (cons T v)))
-                                     (choose-high-card trump left dummy right declarer)))
-               (new-inverted left-left left-dummy left-right left-declarer)
-        (if (not left-left) (if inverted (list taken dummy right declarer left)
-                                         (list taken declarer left dummy right))
-            (apply #'immediate-loosers (list trump left-declarer left-left
-                                             left-dummy left-right 
-                                             (+ taken 1)
-                                             (xor inverted new-inverted))))))
-
-(test (immediate-loosers 'H '((0 1 6 7) (3 5 12) (3 5 7 12) (8 12))
-                            '((2 3 11 12) (1 2 4 11) (6 9) (0 1 3))
-                            '((4 8 10) (0 6 7 8) (1 10) (2 5 6 7 11))
-                            '((5 9) (9 10) (0 2 4 8 11) (4 9 10)))
-      '(3 ((7) (3 5 12) (3 5 7 12) (8 12))
-          ((3) (1 2 4 11) (6 9) (0 1 3))
-          (() (0 6 7 8) (1 10) (2 5 6 7 11))
-          (() (9 10) (2 4 8 11) (4 9 10)))
-      equal)
-
-
-(test (immediate-loosers 'C '((0 9 11) (2 7 9) (5 8 11) (5 9 10 11)) 
-                            '((4 6) (1) (0 1 2 9 10 12) (1 2 4 7))
-                            '((2 3 5 7 8 12) (0 3 6 11) (3 7) (0))
-                            '((1 10) (4 5 8 10 12) (4 6) (3 6 8 12)))
-      '(5 ((0 9 11) () (8 11) (9 10 11)) 
-          (() () (0 1 2 9 10) (2 4 7))
-          ((2 3 5 7 8 12) (11) (7) ())
-          ((1 10) (8 10) (6) (3 6 8)))
-      equal)
-
-(test (immediate-loosers 'H '((4 6) (1) (0 1 2 9 10 12) (1 2 4 7))
-                            '((0 9 11) (2 7 9) (5 8 11) (5 9 10 11)) 
-                            '((1 10) (4 5 8 10 12) (4 6) (3 6 8 12))
-                            '((2 3 5 7 8 12) (0 3 6 11) (3 7) (0)))
-      '(2 (() (1) (0 1 2 9 10 12) (1 2 4 7))
-          ((9) (2 7 9) (5 8 11) (5 9 10 11)) 
-          (() (4 5 8 10 12) (4 6) (3 6 8 12))
-          ((3 5 7 8) (0 3 6 11) (3 7) (0)))
-      equal)
 
 (defun finesse-if-possible (suit high h1 h2)
     (let* ((h2-max (or (apply #'max? (nth (suitno suit) h2)) 0))
@@ -975,6 +979,116 @@
       '(11 ((1 10) (4 5 8) (4 6) (3 6 8 12)))
       equal)
 
+(defun choose-high-card (trump leader left partner right)
+    (let* ((suit (find-suit (lambda (suit l op1 p op2)
+                                (and l op1 op2 suit
+                                     (let ((lc (lastcar l))
+                                           (c1 (lastcar op1))
+                                           (c2 (lastcar op2))
+                                           (pc (lastcar p)))
+                                         (or (and (> lc c1) (> lc c2))
+                                             (and pc (> pc c1) (> pc c2))))))
+                            leader left partner right)))
+        (if suit (if (let ((lc (lastcar (nth (suitno suit) leader)))
+                           (pc (lastcar (nth (suitno suit) partner))))
+                         (or (not pc) (> lc pc)))
+                     (list NIL
+                           (second (play-high suit leader))
+                           (second (play-low suit left))
+                           (or (second (play-low suit partner)) ;partner may drop non-trump
+                               (second (play-low (find-if #'non-nil 
+                                                          (loop for suit in '(c d h s)
+                                                                for suitno from 0 to 3
+                                                                collect (and (not (eq suit trump))
+                                                                             (nth suitno partner)
+                                                                             suit)))
+                                                 partner)))
+                           (second (play-low suit right)))
+                     (let* ((a (play-low suit leader))
+                            (b (beat-or-low suit (first a) left))
+                            (c (finesse-if-possible suit (first b) partner right))
+                            (d (play-low suit right)))
+                        (list T (second a) (second b) (second c) (second d)))))))
+
+(test (choose-high-card 'H '((7 12) (1 2 4 11) (6 9) (0 1 3))
+                           '((6 11) (3 5 12) (3 5 7 12) (8 12))
+                           '(() (0 6 7 8) (1 10) (2 5 6 7 11))
+                           '((10) (9 10) (0 2 4 8 11) (4 9 10)))
+        '(NIL ((7) (1 2 4 11) (6 9) (0 1 3))
+              ((11) (3 5 12) (3 5 7 12) (8 12))
+              (() (6 7 8) (1 10) (2 5 6 7 11))
+              (() (9 10) (0 2 4 8 11) (4 9 10)))
+        equal)
+
+(test (choose-high-card 'H '((7) (0 1 2 4 11) (6 9) (0 1 3))
+                           '((6 11) (3 5 12) (3 5 7 12) (8 12))
+                           '((12) (6 7 8) (1 10) (2 5 6 7 11))
+                           '((10) (9 10) (0 2 4 8 11) (4 9 10)))
+        '(T (() (0 1 2 4 11) (6 9) (0 1 3))
+            ((6) (3 5 12) (3 5 7 12) (8 12))
+            (() (6 7 8) (1 10) (2 5 6 7 11))
+            (() (9 10) (0 2 4 8 11) (4 9 10)))
+        equal)
+
+(defun invert-if-needed (lst)
+    (letcar lst
+        (if head (cons head (roll 2 tail))
+            lst)))
+
+(test (invert-if-needed '(T 1 2 3 4))
+     '(T 3 4 1 2)
+     equal)
+
+(test (invert-if-needed '(nil 1 2 3 4))
+     '(nil 1 2 3 4)
+     equal)
+
+(test (invert-if-needed nil)
+     nil
+     equal)
+
+(defun immediate-loosers (trump declarer left dummy right &optional (taken 0) inverted)
+    (let-from! (invert-if-needed (or (let ((v (choose-void trump left dummy right declarer)))
+                                        (if v (cons T v)))
+                                     (choose-high-card trump left dummy right declarer)))
+               (new-inverted left-left left-dummy left-right left-declarer)
+        (if (not left-left) (if inverted (list taken dummy right declarer left)
+                                         (list taken declarer left dummy right))
+            (apply #'immediate-loosers (list trump left-declarer left-left
+                                             left-dummy left-right 
+                                             (+ taken 1)
+                                             (xor inverted new-inverted))))))
+
+(test (immediate-loosers 'H '((0 1 6 7) (3 5 12) (3 5 7 12) (8 12))
+                            '((2 3 11 12) (1 2 4 11) (6 9) (0 1 3))
+                            '((4 8 10) (0 6 7 8) (1 10) (2 5 6 7 11))
+                            '((5 9) (9 10) (0 2 4 8 11) (4 9 10)))
+      '(3 ((7) (3 5 12) (3 5 7 12) (8 12))
+          ((3) (1 2 4 11) (6 9) (0 1 3))
+          (() (0 6 7 8) (1 10) (2 5 6 7 11))
+          (() (9 10) (2 4 8 11) (4 9 10)))
+      equal)
+
+(test (immediate-loosers 'C '((0 9 11) (2 7 9) (5 8 11) (5 9 10 11)) 
+                            '((4 6) (1) (0 1 2 9 10 12) (1 2 4 7))
+                            '((2 3 5 7 8 12) (0 3 6 11) (3 7) (0))
+                            '((1 10) (4 5 8 10 12) (4 6) (3 6 8 12)))
+      '(5 ((0 9 11) () (8 11) (9 10 11)) 
+          ((6) () (1 2 9 10) (2 4 7))
+          ((2 3 5 7 8 12) (11) (7) ())
+          ((1 10) (5 8) (6) (3 6 8)))
+      equal)
+
+(test (immediate-loosers 'H '((4 6) (1) (0 1 2 9 10 12) (1 2 4 7))
+                            '((0 9 11) (2 7 9) (5 8 11) (5 9 10 11)) 
+                            '((1 10) (4 5 8 10 12) (4 6) (3 6 8 12))
+                            '((2 3 5 7 8 12) (0 3 6 11) (3 7) (0)))
+      '(2 (() (1) (0 1 2 9 10 12) (1 2 4 7))
+          ((11) (2 7 9) (5 8 11) (5 9 10 11)) 
+          (() (4 5 8 10 12) (4 6) (3 6 8 12))
+          ((3 5 7 8) (0 3 6 11) (3 7) (0)))
+      equal)
+
 (defun play-round (suit dealer left dummy right)
     (let ((dummy-max (apply #'max? (nth (suitno suit) dummy)))
           (dealer-max (apply #'max? (nth (suitno suit) dealer))))
@@ -996,14 +1110,14 @@
                    (list (if (> (car h1) (max (or (car h2) 0) (or (car h4) 0))) 1 -1)
                          (second h3) (second h4) (second h1) (second h2))))
               ((> dealer-max dummy-max)
-               (let* ((h1 (play-low suit dummy))
+               (let* ((h1 (second (play-low suit dummy)))
                       (h2 (beat-or-low suit 13 right))
                       (h3 (finesse-if-possible suit (car h2) dealer left))
                       (h4 (beat-or-low suit (car h3) left)))
                    (list (if (> (car h3) (or (car h4) 0)) 1 -1)
                          (second h3) (second h4) h1 (second h2))))
               (t
-               (let* ((h1 (play-low suit dealer))
+               (let* ((h1 (second (play-low suit dealer)))
                       (h2 (beat-or-low suit 13 left))
                       (h3 (finesse-if-possible suit (car h2) dummy right))
                       (h4 (beat-or-low suit (car h3) right)))
@@ -1168,23 +1282,22 @@
 
 (defgeneric proplist (obj))
 (defmethod proplist ((obj card-description))
-    (mapcar #'second (slot-value obj 'properties)))
+    (flatten (mapcar #'second (slot-value obj 'properties))))
 
 (defun deal-mc (trump hands &rest props)
-    (merge-by #'histmerge
-        (histogram
-            (loop for i from 0 to 25000
-                  collect (proplist (labels ((self (desc props)
-                                                (if props (self (add-prop desc (car props)) (cdr props))
-                                                    desc)))
-                                        (self (make-instance 'card-description
-                                                             :< (eval hands)
-                                                             :trump trump
-                                                             :names '(p left me right))
-                                              props)))))))
+    (histogram
+        (loop for i from 0 to 25000
+              collect (proplist (labels ((self (desc props)
+                                            (if props (self (add-prop desc (car props)) (cdr props))
+                                                      desc)))
+                                    (self (make-instance 'card-description
+                                                         :< (eval hands)
+                                                         :trump trump
+                                                         :names '(p left me right))
+                                           props))))))
 
-(deal-mc 'h '(reorder (gen-partner-deal '((9 8 3 2) (A 7 5) (A 9 7 5) (10 A))
-                                        9 '(H :hcp 3 :len 5))
-                      '(1 2 0 3))
-             'untrump-balance 'immediate-loosers)
+(print-hist (deal-mc 'h '(reorder (gen-partner-deal '((9 8 3 2) (A 7 5) (A 9 7 5) (10 A))
+                                                    9 '(H :hcp 3 :len 5))
+                                  '(1 2 0 3))
+                     'untrump-balance 'immediate-loosers))
 
