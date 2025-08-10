@@ -571,7 +571,7 @@
 
 (defun permut-weight (supply permut)
     (apply #'* (loop for p in permut
-                     for s in (add-zeros 4 supply)
+                     for s in (add-zeros (length permut) supply)
                      collect (k-permutation s p))))
     
 (test (permut-weight '(4 4 4 4) '(1 2 0 0)) 48 eq)
@@ -580,15 +580,14 @@
 (test (permut-weight '(0 1 0 0) '(0 3 0 0)) 0 eq)
 (test (permut-weight '(3 3 3) '(1 1 1 1)) 0 eq)
     
-(defun permut-for-kind (kind target division &key (max 13))
-    (cond ((eq kind 'hcp) (let* ((figures (cdr division))
-                                 (fig-supply (mapcar #'length figures))
-                                 (fig-permuts (valid-hcp-sums target fig-supply))
-                                 (fig-permut (randcar-weights 
-                                                (zip-weight (curry #'permut-weight fig-supply)
-                                                            fig-permuts))))
-                              (cons (- max (apply #'+ fig-permut)) fig-permut)))
-          ((eq kind 'distribution) (if (= (apply #'+ target) max) target
+(defun permut-for-kind (kind target division &key (total 13))
+    (cond ((eq kind 'hcp) (let* ((supply (mapcar #'length division))
+                                 (permuts (mapcar (lambda (perm)
+                                                     (cons (- total (apply #'+ perm)) perm))
+                                                  (valid-hcp-sums target (cdr supply)))))
+                             (randcar-weights (zip-weight (curry #'permut-weight supply)
+                                                          permuts))))
+          ((eq kind 'distribution) (if (= (apply #'+ target) total) target
                                        (error 'wrong-distribution := target)))))
 
 (defun card-weight (hcp-dist suit-dist card)
@@ -628,7 +627,7 @@
 (defun gen-hand (target kind &key cards (max 13))
     (let* ((division (cards-by (classifier-for-kind kind) 
                                (or cards (all-cards))))
-           (permut (permut-for-kind kind target division :max max)))
+           (permut (permut-for-kind kind target division :total max)))
         (if permut
             (zip-deals (loop for class in division
                              for amount in permut
@@ -1631,7 +1630,7 @@
 
 (defun deal-mc (trump hands &rest props)
     (histogram
-        (loop for i from 0 to 1000
+        (loop for i from 0 to 5000
               collect (proplist (labels ((self (desc props)
                                             (if props (self (add-prop desc (car props)) (cdr props))
                                                       desc)))
@@ -1642,6 +1641,6 @@
                                            props))))))
 
 (print-hist (deal-mc 'h '(reorder (gen-partner-deal '((A 8 3 2) (A 7 5) (10 9 7 5) (A 10))
-                                                    9 '(H :hcp 4 :len 5))
+                                                    9 '(H :hcp 3 :len 5))
                                   '(1 2 0 3))
                      'immediate-loosers 'play-deal))
