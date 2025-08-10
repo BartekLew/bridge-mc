@@ -562,15 +562,23 @@
 (test (k-permutation 3 2) 6 eq)
 (test (k-permutation 4 2) 12 eq)
 
+(defun add-zeros (len lst)
+    (let ((to-add (- len (length lst))))
+        (if (> to-add 0) (append lst 
+                                 (loop for i from 1 to to-add 
+                                       collect 0))
+                         lst)))
+
 (defun permut-weight (supply permut)
-    (apply #'* (loop for s in supply
-                     for p in permut
+    (apply #'* (loop for p in permut
+                     for s in (add-zeros 4 supply)
                      collect (k-permutation s p))))
     
 (test (permut-weight '(4 4 4 4) '(1 2 0 0)) 48 eq)
 (test (permut-weight '(1 2 0 0) '(1 2 0 0)) 2 eq)
 (test (permut-weight '(0 0 0 0) '(0 3 0 0)) 0 eq)
 (test (permut-weight '(0 1 0 0) '(0 3 0 0)) 0 eq)
+(test (permut-weight '(3 3 3) '(1 1 1 1)) 0 eq)
     
 (defun permut-for-kind (kind target division &key (max 13))
     (cond ((eq kind 'hcp) (let* ((figures (cdr division))
