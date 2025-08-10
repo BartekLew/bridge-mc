@@ -493,11 +493,11 @@
                 (if next (permuts n max (cons next acc))
                     acc)))))
 
-(defun valid-hcp-sums (value &optional supply)
-    (filter (lambda (lst) (and (= (apply #'+ (loop for x in lst
-                                              for i from 1
-                                                  collect (* i x)))
-                                  value)
+(defun valid-hcp-sums (value &key (test #'=) supply)
+    (filter (lambda (lst) (and (funcall test (apply #'+ (loop for x in lst
+                                                              for i from 1
+                                                              collect (* i x)))
+                                             value)
                                (or (not supply) 
                                    (not (position nil (loop for x in lst
                                                         for y in supply
@@ -525,8 +525,25 @@
         (0 2 3 0) (2 1 3 0) (4 0 3 0) (1 3 2 0) (3 2 2 0) (2 4 1 0) (4 3 1 0))
       equal)
 
-(test (valid-hcp-sums 13 '(4 1 0 4))
+(test (valid-hcp-sums 13 :supply '(4 1 0 4))
       '((1 0 0 3) (3 1 0 2))
+      equal)
+
+(test (valid-hcp-sums 10 :test #'<)
+      '((1 0 0 2) (0 0 0 2) (0 1 1 1) (2 0 1 1) (1 0 1 1) (0 0 1 1) (1 2 0 1)
+        (0 2 0 1) (3 1 0 1) (2 1 0 1) (1 1 0 1) (0 1 0 1) (4 0 0 1) (3 0 0 1)
+        (2 0 0 1) (1 0 0 1) (0 0 0 1) (0 0 3 0) (1 1 2 0) (0 1 2 0) (3 0 2 0)
+        (2 0 2 0) (1 0 2 0) (0 0 2 0) (0 3 1 0) (2 2 1 0) (1 2 1 0) (0 2 1 0)
+        (4 1 1 0) (3 1 1 0) (2 1 1 0) (1 1 1 0) (0 1 1 0) (4 0 1 0) (3 0 1 0)
+        (2 0 1 0) (1 0 1 0) (0 0 1 0) (1 4 0 0) (0 4 0 0) (3 3 0 0) (2 3 0 0)
+        (1 3 0 0) (0 3 0 0) (4 2 0 0) (3 2 0 0) (2 2 0 0) (1 2 0 0) (0 2 0 0)
+        (4 1 0 0) (3 1 0 0) (2 1 0 0) (1 1 0 0) (0 1 0 0) (4 0 0 0) (3 0 0 0)
+        (2 0 0 0) (1 0 0 0) (0 0 0 0))
+      equal)
+ 
+(test (valid-hcp-sums 20 :test #'>= :supply '(0 2 2 4))
+      '((0 2 2 4) (0 1 2 4) (0 0 2 4) (0 2 1 4) (0 1 1 4) (0 2 0 4) (0 2 2 3)
+        (0 1 2 3))
       equal)
 
 (defun zip-deals (deals &optional acc)
@@ -580,21 +597,15 @@
 (test (permut-weight '(0 1 0 0) '(0 3 0 0)) 0 eq)
 (test (permut-weight '(3 3 3) '(1 1 1 1)) 0 eq)
     
-(defun permut-for-kind (kind target division &key (total 13))
+(defun permut-for-kind (kind target division &key (test #'=) (total 13))
     (cond ((eq kind 'hcp) (let* ((supply (mapcar #'length division))
                                  (permuts (mapcar (lambda (perm)
                                                      (cons (- total (apply #'+ perm)) perm))
-                                                  (valid-hcp-sums target (cdr supply)))))
+                                                  (valid-hcp-sums target :test test :supply (cdr supply)))))
                              (randcar-weights (zip-weight (curry #'permut-weight supply)
                                                           permuts))))
           ((eq kind 'distribution) (if (= (apply #'+ target) total) target
                                        (error 'wrong-distribution := target)))))
-
-(defun card-weight (hcp-dist suit-dist card)
-    (let ((hcpa (or (nth (card-hcp card) hcp-dist) 1))
-          (suita (or (nth (card-suitno card) suit-dist) 1)))
-        (* (if (> hcpa 0) (/ 1 hcpa) 0)
-           (if (> suita 0) (/ 1 suita) 0))))
 
 (defmacro -= (form amount)
     `(setf ,form (- ,form ,amount)))
@@ -604,30 +615,10 @@
         (let-from! (funcall getter source) (card rest)
             (take-many rest getter (- amount 1) (cons card acc)))))
 
-(defun gen-hand* (hcp distrib &optional cards)
-    (if (not cards) (setf cards (all-cards)))
-    (let* ((division (cards-by #'card-hcp cards))
-           (hcp-target (if hcp (permut-for-kind 'hcp hcp division)))
-           (highcards (apply #'append (cdr division))))
-        (flet ((draw (cardset amount)
-            (take-many cardset
-                       (lambda (lst) 
-                         (let ((idx (wrand (mapcar (curry #'card-weight hcp-target distrib)
-                                                   lst))))
-                           (let-from! (take idx lst) (card rest)
-                               (-= (nth (card-hcp card) hcp-target) 1)
-                               (-= (nth (card-suitno card) distrib) 1)
-                               (list card rest))))
-                       amount)))
-            (zip-deals (list (draw highcards (apply #'+ (cdr hcp-target)))
-                             (draw (car division) (car hcp-target)))))))
-                         
-(hand (car (gen-hand* 15 '(4 3 3 3))))
-
-(defun gen-hand (target kind &key cards (max 13))
+(defun gen-hand (target kind &key cards (test #'=) (total 13))
     (let* ((division (cards-by (classifier-for-kind kind) 
                                (or cards (all-cards))))
-           (permut (permut-for-kind kind target division :total max)))
+           (permut (permut-for-kind kind target division :test test :total total)))
         (if permut
             (zip-deals (loop for class in division
                              for amount in permut
@@ -794,16 +785,18 @@
 
 (mc-case (fit-n-distrib 0) :first-hand '(gen-hand '(5 3 3 2) 'distribution))
 
-(defun gen-suit (cards suit &key hcp len)
-    (if hcp (gen-hand hcp 'hcp :max len :cards (remove-if (lambda (c) (not (eq suit (car c)))) cards))
+(defun gen-suit (cards suit &key (hcp-test #'=) hcp len)
+    (if hcp (gen-hand hcp 'hcp :total len :test hcp-test 
+                               :cards (remove-if (lambda (c) (not (eq suit (car c)))) cards))
             (deal len (remove-if (lambda (c) (not (eq suit (car c)))) cards)))) 
-    
+
 (defun gen-partner-deal (base hcp &rest rules)
     (let ((starter (second (remove-cards (unhand base) (all-cards)))))
          (let ((from-rules (zip-deals (loop for rule in rules
                                             collect (apply #'gen-suit (cons starter rule))))))
-              (let ((beyond-rules (gen-hand hcp 'hcp 
-                                            :max (- 13 (length (second from-rules)))
+              (let ((beyond-rules (gen-hand (- hcp (apply #'+ (mapcar #'card-hcp (second from-rules))))
+                                            'hcp 
+                                            :total (- 13 (length (second from-rules)))
                                             :cards (remove-if (lambda (c) (find (first c) 
                                                                           (mapcar #'first rules)))
                                                               starter))))
@@ -1630,7 +1623,7 @@
 
 (defun deal-mc (trump hands &rest props)
     (histogram
-        (loop for i from 0 to 5000
+        (loop for i from 0 to 1000
               collect (proplist (labels ((self (desc props)
                                             (if props (self (add-prop desc (car props)) (cdr props))
                                                       desc)))
@@ -1640,7 +1633,7 @@
                                                          :names '(p left me right))
                                            props))))))
 
-(print-hist (deal-mc 'h '(reorder (gen-partner-deal '((A 8 3 2) (A 7 5) (10 9 7 5) (A 10))
-                                                    9 '(H :hcp 3 :len 5))
+(print-hist (deal-mc 'h '(reorder (gen-partner-deal '((9 8 3 2) (A 7 5) (A 9 7 5) (A 10))
+                                                    12 '(H :hcp 3 :hcp-test > :len 5))
                                   '(1 2 0 3))
                      'immediate-loosers 'play-deal))
