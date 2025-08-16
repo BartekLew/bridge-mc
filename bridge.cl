@@ -89,6 +89,14 @@
       '(21 5 10)
       equal)
 
+(defun seektree (path tree)
+    (if path (seektree (cdr path) (nth (car path) tree))
+             tree))
+
+(test (seektree '(2 1) '((1 2 4) (5 6 73) (3 (32 1))))
+     '(32 1)
+     equal)
+
 (defun push-pos (lst pos element)
     (loop for i from 0 to (max (- (length lst) 1) pos)
           collect (if (= pos i) (cons element (nth i lst))
@@ -624,12 +632,6 @@
                              for amount in permut
                              collect (deal amount class))))))
 
-(let-from! (gen-hand 11 'hcp) (rest n)
-    (print-deal (mapcar #'hand (deal-all 13 rest (list n)))))
-
-(let-from! (gen-hand '(5 2 2 4) 'distribution) (rest n)
-    (print-deal (mapcar #'hand (deal-all 13 rest (list n)))))
-
 ;======================================
 ; Monte-carlo deals & reporting stats
 ;======================================
@@ -803,6 +805,23 @@
                    (let ((partner (zip-deals (list beyond-rules from-rules))))
                        (append (list (unhand base)(second partner))
                                (deal-all 13 (first partner))))))))
+
+(defun gen-partner-deal* (base hcp &rest rules)
+    (let ((starter (second (remove-cards (unhand base) (all-cards)))))
+         (let* ((from-rules (zip-deals (loop for rule in rules
+                                            collect (apply #'gen-suit (cons starter rule)))))
+                (beyond-rules (gen-hand (- hcp (apply #'+ (mapcar #'card-hcp (second from-rules))))
+                                        'hcp 
+                                        :total (- 13 (length (second from-rules)))
+                                        :cards (append (remove-if (lambda (c) 
+                                                                    (find (first c) (mapcar #'first rules)))
+                                                                  starter)
+                                                       (car from-rules)))))
+                   (let ((partner (list (car beyond-rules)
+                                        (append (second beyond-rules)
+                                                (second from-rules)))))
+                       (append (list (unhand base)(second partner))
+                               (deal-all 13 (first partner)))))))
 
 ;; Test  deal
 ;; Declarer: ♣ QJ7 ♦ QJ ♥ K10642 ♠ QJ6
@@ -1126,7 +1145,8 @@
                              ((and hsuit (eq hsuit suit))
                                 (or (if (nth suit (suits h2))
                                         (let ((h2-max (apply #'max (nth suit (suits h2)))))
-                                           (or (play h1 suit (curry #'take-match (curry #'< h2-max)))
+                                           (or (play h1 suit (curry #'take-match (andf (curry #'< h2-max)
+                                                                                       (curry #'< hrank))))
                                                (play h1 suit (curry #'take-match (curry #'< hrank)))))
                                         (play h1 suit (curry #'take-match (curry #'< hrank))))
                                     (play h1 suit #'lowest-card)
@@ -1234,6 +1254,12 @@
       '((2 9) ((4 6) (1) (0 1 2 10 12) (2 4 7)))
       equal)
 
+(test (as-list (finesse-if-possible (make-instance 'trick :suit 'h :high '(2 10) :winner 1)
+                                    (make-instance 'hand := '((3 10 12) (1 8) (4 6 9 11) (2 3 10)))
+                                    (make-instance 'hand := '((8 9 11) (6 7 9 10) (0) (0 5 7 9)))))
+      '((2 11) ((3 10 12) (1 8) (4 6 9) (2 3 10)))
+      equal)
+                     
 (defun choose-high-card (trump leader left partner right)
     (let* ((suit (find-suit (lambda (suit l op1 p op2)
                                 (and l op1 op2 suit
@@ -1308,8 +1334,7 @@
                                         (if v (cons T v)))
                                      (choose-high-card trump left dummy right declarer)))
                (new-inverted left-left left-dummy left-right left-declarer)
-        (if (not left-left) (if inverted (list taken dummy right declarer left)
-                                         (list taken declarer left dummy right))
+        (if (not left-left) taken
             (apply #'immediate-loosers (list trump left-declarer left-left
                                              left-dummy left-right 
                                              (+ taken 1)
@@ -1319,30 +1344,20 @@
                             '((2 3 11 12) (1 2 4 11) (6 9) (0 1 3))
                             '((4 8 10) (0 6 7 8) (1 10) (2 5 6 7 11))
                             '((5 9) (9 10) (0 2 4 8 11) (4 9 10)))
-      '(3 ((7) (3 5 12) (3 5 7 12) (8 12))
-          ((3) (1 2 4 11) (6 9) (0 1 3))
-          (() (0 6 7 8) (1 10) (2 5 6 7 11))
-          (() (9 10) (2 4 8 11) (4 9 10)))
+      3
       equal)
 
 (test (immediate-loosers 'C '((0 9 11) (2 7 9) (5 8 11) (5 9 10 11)) 
                             '((4 6) (1) (0 1 2 9 10 12) (1 2 4 7))
                             '((2 3 5 7 8 12) (0 3 6 11) (3 7) (0))
                             '((1 10) (4 5 8 10 12) (4 6) (3 6 8 12)))
-      '(5 ((0 9 11) () (8 11) (9 10 11)) 
-          ((6) () (1 2 9 10) (2 4 7))
-          ((2 3 5 7 8 12) (11) (7) ())
-          ((1 10) (5 8) (6) (3 6 8)))
-      equal)
+      5 equal)
 
 (test (immediate-loosers 'H '((4 6) (1) (0 1 2 9 10 12) (1 2 4 7))
                             '((0 9 11) (2 7 9) (5 8 11) (5 9 10 11)) 
                             '((1 10) (4 5 8 10 12) (4 6) (3 6 8 12))
                             '((2 3 5 7 8 12) (0 3 6 11) (3 7) (0)))
-      '(2 (() (1) (0 1 2 9 10 12) (1 2 4 7))
-          ((11) (2 7 9) (5 8 11) (5 9 10 11)) 
-          (() (4 5 8 10 12) (4 6) (3 6 8 12))
-          ((2 3 5 8) (0 3 6 11) (3 7) (0)))
+      2
       equal)
 
 (defun play-round (suit trump dealer left dummy right)
@@ -1476,7 +1491,7 @@
 (defun untrump-balance (trump declarer left dummy right &optional (winers 0) (loosers 0))
     (if (not (or (nth (suitno trump) left)
                  (nth (suitno trump) right)))
-        (list (list loosers winers) declarer left dummy right)
+        (list loosers winers)
         (let-from! (as-summary (play-round trump trump declarer left dummy right))
                    (score ndec nleft ndummy nright)
             (untrump-balance trump ndec nleft ndummy nright (if (< score 0) winers (+ winers 1))
@@ -1486,30 +1501,21 @@
                           '((2 3 11 12) (1 2 4 11) (6 9) (0 1 3))
                           '((4 8 10) (0 6 7 8) (1 10) (2 5 6 7 11))
                           '((5 9) (9 10) (0 2 4 8 11) (4 9 10)))
-      '((0 3) ((1 6 7) (3 5 12) (3 5 7 12) ())
-              ((2 3 11 12) (1 2 4 11) (6 9) ())
-              ((4 8 10) (0 6 7 8) (1 10) (6 7))
-              ((5 9) (9 10) (0 2 4 8 11) ()))
+      '(0 3)
       equal)
 
 (test (untrump-balance 'C '((0 9 11) (9) (8 11) (9 10 11)) 
                         '((6) () (0 1 2 9 10) (2 4 7))
                         '((2 3 5 7 8 12) (11) (7) ())
                         '((1 10) (5 8 10) (6) (3 6 8)))
-      '((0 2) ((9) (9) (8 11) (9 10 11)) 
-              (() () ( 1 2 9 10) (2 4 7))
-              ((3 5 7 8) (11) (7) ())
-              (() (5 8 10) (6) (3 6 8)))
+      '(0 2)
       equal)
 
 (test (untrump-balance 'H '((4 6) (1) (0 1 2 9 10 12) (1 2 4 7))
                         '((2 3 5 7 8 12) (0 3 6 11) (3 7) (0))
                         '((1 10) (4 5 8 10 12) (4 6) (3 6 8 12))
                         '((0 9 11) (2 7 9) (5 8 11) (5 9 10 11)))
-      '((0 3) ((4 6) (1) (0 1 2) (1 2 4 7))
-              ((2 3 5 7 8 12) (3 6 11) () (0))
-              ((10) (4 5 8 10 12) () (3 6 8 12))
-              ((0 9 11) (2 7 9) () (5 9 10 11)))
+      '(0 3)
       equal)
 
 ;; More probable EW spade contract is very sad when it comes to untrump:
@@ -1522,10 +1528,7 @@
                         '((2 3 5 7 8 12) (0 3 6 11) (3 7) (0))
                         '((1 10) (4 5 8 10 12) (4 6) (3 6 8 12))
                         '((0 9 11) (2 7 9) (5 8 11) (5 9 10 11)))
-      '((3 1) ((4 6) (1) (0 1 2 9 10 12) ())
-              ((5 7 8 12) (3 6 11) (3 7) ())
-              ((1 10) (4 5 8 10 12) (4 6) ())
-              ((0 9 11) (2 7 9) (5 8 11) ()))
+      '(3 1)
       equal)
 
 (defclass cache ()
@@ -1554,28 +1557,20 @@
                                                                       ns)))
                                                     (if (or (not acc) (> newscore (car acc)))
                                                       (list newscore
-                                                            (cons (cards trick) nt))
+                                                            (cons (cons (winner trick)(cards trick) ) nt))
                                                       acc)))
-                                         (list -1 nil))))
+                                         (list 0 nil))))
                                nil
                                '(c d h s))))))
             (run cache declarer left dummy right)))
 
-(let ((deal '(((4 6) (1) (0 1 2 9 10 12) (1 2 4 7))
-              ((2 3 5 7 8 12) (0 3 6 11) (3 7) (0))
-              ((1 10) (4 5 8 10 12) (4 6) (3 6 8 12))
-              ((0 9 11) (2 7 9) (5 8 11) (5 9 10 11)))))
+(defun simdeal (deal)
     (print-deal deal '(n e s w))
     (let-from! (apply 'play-deal (cons 'h deal))
                (winners tricks)
         (format t "winners: ~A~%" winners)
         (loop for trick in tricks
-              do (format t "~{~A ~}~%" (mapcar #'cardstr trick)))))
-
-(play-deal 'H '((4 9 11) (8 10 11) (0 2 4 9 10) (5 6))
-              '((3 5 10 12) (0 2 4 6) (1) (1 2 3 11))
-              '((0 1 6 7) (3 5 12) (3 5 7 12) (8 12))
-              '((2 8) (1 7 9) (6 8 11) (0 4 7 9 10)))
+              do (format t "~{~A ~}/~A~%" (mapcar #'cardstr (cdr trick)) (car trick)))))
 
 (defun dump-chosen (fn test printer)
     (lambda (&rest args)
@@ -1585,55 +1580,92 @@
                     (format t "~A(~A) -> ~A" fn args ans)))
             ans)))
 
+(defun shortest-side-suits (trump declarer left dummy right)
+    (declare (ignore trump))
+    (declare (ignore left))
+    (declare (ignore dummy))
+    (declare (ignore right))
+    (subseq (sort (mapcar #'length declarer) #'<) 0 2))
 
-(defclass card-description ()
-    ((deal :initarg :< :initform nil)
-     (remaining :initform nil :reader remaining)
-     (trump :initarg :trump :reader trump)
-     (names :initarg :names :initform '(n e s w))
-     (properties :initform nil :reader props)))
+(defun best-tricks (trump n e s w)
+    (min (first (play-deal trump n e s w)) (- 13 (immediate-loosers trump n e s w))))
 
-(defmethod initialize-instance ((self card-description) &key < trump names)
-    (let ((hands (mapcar #'hand <)))
-        (setf (slot-value self 'deal) hands)
-        (setf (slot-value self 'remaining) hands)
-        (setf (slot-value self 'names) names)
-        (setf (slot-value self 'trump) trump)
-        (setf (slot-value self 'properties) nil)))
+(defclass mc-case ()
+    ((props :initarg :=)
+     (dealgen :initarg :!)
+     (trump :initarg :trump)
+     (data :initform nil)))
 
+(defmethod sim ((self mc-case) runs)
+    (with-slots (props dealgen trump data) self
+        (loop for i from 0 to runs
+              do (let ((deal (mapcar #'hand (eval dealgen))))
+                    (setf data (cons (cons  deal
+                                            (mapcar (lambda (prop)
+                                                       (apply prop (cons trump deal)))
+                                                    props))
+                                     data)))))
+    self)
 
-(defgeneric add-prop (desc fn))
-(defmethod add-prop ((desc card-description) fn)
-    (with-slots (deal remaining trump properties) desc
-        (let-from! (apply fn (cons trump remaining))
-                   (ans leader left p right)
-            (setf remaining (list leader left p right))
-            (setf properties (cons (list fn ans) properties))))
-    desc)
+(defmethod add-prop ((self mc-case) &rest new-props)
+    (with-slots (props trump data) self
+        (loop for row in data
+              do (setf (cdr (last row)) (mapcar (lambda (prop)
+                                                    (apply prop (cons trump (car row))))
+                                                new-props)))
+        (setf (cdr (last props)) props)))
 
-(defmethod show ((desc card-description))
-    (with-slots (deal properties names) desc
-        (print-deal deal names)
-        (loop for prop in properties
-              do (format t "~A: ~A~%" (car prop) (second prop)))))
+(defmethod choose ((self mc-case) exp)
+    (with-slots (props data) self
+        (let ((pred (sublis (loop for i from 0
+                                     for sym in (cons 'hand props)
+                                     collect `(,sym . (nth ,i row)))
+                    exp)))
+            (filter (eval `(lambda (row) ,pred)) data))))
 
-(defgeneric proplist (obj))
-(defmethod proplist ((obj card-description))
-    (flatten (mapcar #'second (slot-value obj 'properties))))
+(defmethod select ((self mc-case) &key fields filter)
+    (with-slots (data props) self
+        (let ((source (if filter (filter filter data)
+                        data)))
+            (if fields (let ((col-ids (mapcar (lambda (sym)
+                                                 (position sym (cons 'hand props))) 
+                                              fields)))
+                           (loop for row in source
+                                 collect (loop for c in col-ids
+                                               collect (nth c row))))
+                       (mapcar #'cdr source)))))
 
-(defun deal-mc (trump hands &rest props)
-    (histogram
-        (loop for i from 0 to 1000
-              collect (proplist (labels ((self (desc props)
-                                            (if props (self (add-prop desc (car props)) (cdr props))
-                                                      desc)))
-                                    (self (make-instance 'card-description
-                                                         :< (eval hands)
-                                                         :trump trump
-                                                         :names '(p left me right))
-                                           props))))))
+(defun exact-dist (trump &rest hands)
+    (declare (ignore trump))
+    (mapcar #'length (first hands)))
 
-(print-hist (deal-mc 'h '(reorder (gen-partner-deal '((9 8 3 2) (A 7 5) (A 9 7 5) (A 10))
-                                                    12 '(H :hcp 3 :hcp-test > :len 5))
-                                  '(1 2 0 3))
-                     'immediate-loosers 'play-deal))
+(defun exact-hcp-dist (trump &rest hands)
+    (declare (ignore trump))
+    (loop for suit in (first hands)
+          collect (apply #'+ (mapcar #'rank-hcp suit))))
+
+(defun partner-clubs (trump &rest hands)
+    (declare (ignore trump))
+    (labels ((self (hand &optional acc)
+                (letcar hand
+                    (if (not head) (reverse acc)
+                        (let ((high (- head 9)))
+                          (if (>= high 0) (self tail (cons (nth high '(J Q K A)) acc))
+                                          (self nil (cons (length hand) acc))))))))
+        (self (reverse (seektree '(0 0) hands)))))
+
+(defparameter sim (make-instance 'mc-case := '(partner-clubs untrump-balance best-tricks)
+                                    :! '(reorder (gen-partner-deal
+                                                 '((9 8 3 2) (A 7 5) (A 9 7 5) (A 10))
+                                                 12 '(H :hcp 3 :hcp-test >= :len 5))
+                                                 '(1 2 0 3))
+                                    :trump 'h))
+(sim sim 100)
+(print-hist (histogram (mapcar #'flatten (select sim :fields '(untrump-balance) ))))
+
+(print-hist (histogram (select sim :fields '(partner-clubs) )))
+
+;(select sim :fields '(hand))
+(loop for deal in (choose sim '(> (car untrump-balance) 0))
+      do (print-deal (car deal)))
+
