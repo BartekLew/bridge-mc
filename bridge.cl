@@ -1333,7 +1333,7 @@
      equal)
 
 (defun immediate-loosers (trump declarer left dummy right &optional (taken 0) inverted)
-    (let-from! (invert-if-needed (or (let ((v (choose-void trump left dummy right declarer)))
+    (let-from! (invert-if-needed (or (let ((v (and trump (choose-void trump left dummy right declarer))))
                                         (if v (cons T v)))
                                      (choose-high-card trump left dummy right declarer)))
                (new-inverted left-left left-dummy left-right left-declarer)
@@ -1596,7 +1596,7 @@
 (defclass mc-case ()
     ((props :initarg :=)
      (dealgen :initarg :!)
-     (trump :initarg :trump)
+     (trump :initarg :trump :initform nil)
      (data :initform nil)))
 
 (defmethod sim ((self mc-case) runs)
@@ -1672,3 +1672,11 @@
      ((0 1 6 7) (3 5 12) (3 5 7 12) (8 12))
      ((4 9 10) (1 6 9) (6 9) (0 2 6 9 10))))
 
+(defun line-hcp (trump &rest hands)
+    (declare (ignore trump))
+    (apply #'+ (mapcar #'rank-hcp (flatten (append (first hands) (third hands))))))
+
+(defparameter simhcp (make-instance 'mc-case :! '(deal-all 13 (all-cards))
+                                             := '(line-hcp best-tricks)))
+(sim simhcp 10000)
+(print-hist (histogram (select simhcp)))
