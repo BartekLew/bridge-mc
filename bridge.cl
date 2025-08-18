@@ -1597,7 +1597,11 @@
     ((props :initarg :=)
      (dealgen :initarg :!)
      (trump :initarg :trump :initform nil)
-     (data :initform nil)))
+     (data :initform nil :initarg :data)))
+
+(defmethod print-object ((self mc-case) out)
+    (with-slots (props dealgen trump) self
+        (format out "MC-CASE{~A->~A @ ~A}" dealgen props trump)))
 
 (defmethod sim ((self mc-case) runs)
     (with-slots (props dealgen trump data) self
@@ -1640,8 +1644,33 @@
 
 (defmethod show-deals ((self mc-case) filter)
     (loop for deal in (choose sim filter)
-      do (print-deal (peek(car deal)))))
+      do (print-deal (car deal))))
 
+(defmethod save ((self mc-case) filename)
+    (with-open-file (out filename
+                        :direction :output
+                        :if-exists :supersede  
+                        :if-does-not-exist :create)
+        (with-slots (props dealgen trump data) self
+            (let ((*print-pretty* nil))
+                (prin1 (list props dealgen trump) out)
+                (loop for row in data
+                      do (prin1 row out))))))
+
+(defun load-mc-case (filename &key fallback-params sim-count)
+   (with-open-file (s filename :direction :input :if-does-not-exist nil)
+      (if s
+        (let-from! (read s nil :eof)
+                   (props dealgen trump)
+           (let ((data (loop for row = (read s nil :eof)
+                             until (eq row :eof)
+                             collect row)))
+              (make-instance 'mc-case :! dealgen := props :trump trump :data data)))
+        (if fallback-params
+            (let ((obj (apply #'make-instance (cons 'mc-case fallback-params))))
+                (if sim-count (sim obj sim-count)
+                              obj))))))
+    
 (defun partner-clubs (trump &rest hands)
     (declare (ignore trump))
     (labels ((self (hand &optional acc)
@@ -1652,31 +1681,46 @@
                                           (self nil (cons (length hand) acc))))))))
         (self (reverse (seektree '(0 0) hands)))))
 
-(defparameter sim (make-instance 'mc-case := '(partner-clubs untrump-balance best-tricks)
-                                    :! '(reorder (gen-partner-deal
-                                                 '((9 8 3 2) (A 7 5) (A 9 7 5) (A 10))
-                                                 12 '(H :hcp 3 :hcp-test >= :len 5))
-                                                 '(1 2 0 3))
-                                    :trump 'h))
-(sim sim 10000)
-(print-hist (histogram (mapcar #'flatten (select sim :fields '(untrump-balance) ))))
-(print-hist (histogram (mapcar #'flatten (select sim :fields '(best-tricks) ))))
+(defparameter sim (load-mc-case "sim.dat"
+                                :sim-count 10
+                                :fallback-params '(:= (partner-clubs untrump-balance best-tricks)
+                                                   :! (reorder (gen-partner-deal
+                                                                     '((9 8 3 2) (A 7 5) (A 9 7 5) (A 10))
+                                                                     12 '(H :hcp 3 :hcp-test >= :len 5))
+                                                                     '(1 2 0 3))
+                                                   :trump h)))
 
-(print-hist (histogram (select sim :fields '(partner-clubs) )))
+;;(print-hist (histogram (mapcar #'flatten (select sim :fields '(untrump-balance) ))))
+;;(print-hist (histogram (mapcar #'flatten (select sim :fields '(best-tricks) ))))
 
-;(select sim :fields '(hand))
-(show-deals sim '(= best-tricks 12))
+;;(print-hist (histogram (select sim :fields '(partner-clubs) )))
 
-(simdeal ' (((11) (0 4 8 11) (0 1 2 8 11) (4 7 11))
-     ((2 3 5 8 12) (2 7 10) (4 10) (1 3 5))
-     ((0 1 6 7) (3 5 12) (3 5 7 12) (8 12))
-     ((4 9 10) (1 6 9) (6 9) (0 2 6 9 10))))
+;;(select sim :fields '(hand))
+;;(show-deals sim '(= best-tricks 12))
+
+;;(simdeal ' (((11) (0 4 8 11) (0 1 2 8 11) (4 7 11))
+;;     ((2 3 5 8 12) (2 7 10) (4 10) (1 3 5))
+;;     ((0 1 6 7) (3 5 12) (3 5 7 12) (8 12))
+;;     ((4 9 10) (1 6 9) (6 9) (0 2 6 9 10))))
 
 (defun line-hcp (trump &rest hands)
     (declare (ignore trump))
     (apply #'+ (mapcar #'rank-hcp (flatten (append (first hands) (third hands))))))
 
-(defparameter simhcp (make-instance 'mc-case :! '(deal-all 13 (all-cards))
-                                             := '(line-hcp best-tricks)))
-(sim simhcp 10000)
-(print-hist (histogram (select simhcp)))
+(defparameter simhcp (load-mc-case "simhcp.dat"
+                                   :sim-count 10000
+                                   :fallback-params '(:! (deal-all 13 (all-cards))
+                                                      := (line-hcp best-tricks))))
+
+;;(print-hist (histogram (select simhcp)))
+
+(defun hist-plot (histogram)
+    (flet ((rcode (funname histnode)
+        (let ((sorthist (sort histnode (lambda (a b) (< (seektree '(0 0) a) (seektree '(0 0) b))))))
+            (format T "hcp = c(~{~a~^,~}); freq = c(~{~,8f~^,~}); ~a(hcp, freq, type='b');~%"
+                (mapcar (f* #'first #'first) sorthist)
+                (mapcar (f* #'second #'float) sorthist)
+                funname))))
+      (rcode "plot" histogram)))
+
+;;(hist-plot (histogram (select simhcp :fields '(line-hcp))))
