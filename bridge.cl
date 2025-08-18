@@ -969,6 +969,9 @@
     (setf (slot-value self 'suits) (mapcar (lambda (x) (sort x #'<))
                                            =)))
 
+(defmethod print-object ((self hand) out)
+    (format out "HAND<~A>" (suits self)))
+
 (defmethod play ((self hand) suit (chooser function))
     (with-slots (suits) self 
         (let ((played (nth suit suits)))
@@ -1635,14 +1638,9 @@
                                                collect (nth c row))))
                        (mapcar #'cdr source)))))
 
-(defun exact-dist (trump &rest hands)
-    (declare (ignore trump))
-    (mapcar #'length (first hands)))
-
-(defun exact-hcp-dist (trump &rest hands)
-    (declare (ignore trump))
-    (loop for suit in (first hands)
-          collect (apply #'+ (mapcar #'rank-hcp suit))))
+(defmethod show-deals ((self mc-case) filter)
+    (loop for deal in (choose sim filter)
+      do (print-deal (peek(car deal)))))
 
 (defun partner-clubs (trump &rest hands)
     (declare (ignore trump))
@@ -1660,12 +1658,17 @@
                                                  12 '(H :hcp 3 :hcp-test >= :len 5))
                                                  '(1 2 0 3))
                                     :trump 'h))
-(sim sim 100)
+(sim sim 10000)
 (print-hist (histogram (mapcar #'flatten (select sim :fields '(untrump-balance) ))))
+(print-hist (histogram (mapcar #'flatten (select sim :fields '(best-tricks) ))))
 
 (print-hist (histogram (select sim :fields '(partner-clubs) )))
 
 ;(select sim :fields '(hand))
-(loop for deal in (choose sim '(> (car untrump-balance) 0))
-      do (print-deal (car deal)))
+(show-deals sim '(= best-tricks 12))
+
+(simdeal ' (((11) (0 4 8 11) (0 1 2 8 11) (4 7 11))
+     ((2 3 5 8 12) (2 7 10) (4 10) (1 3 5))
+     ((0 1 6 7) (3 5 12) (3 5 7 12) (8 12))
+     ((4 9 10) (1 6 9) (6 9) (0 2 6 9 10))))
 
