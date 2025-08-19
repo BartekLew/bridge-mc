@@ -1693,19 +1693,6 @@
                                                                      '(1 2 0 3))
                                                    :trump h)))
 
-;;(print-hist (histogram (mapcar #'flatten (select sim :fields '(untrump-balance) ))))
-;;(print-hist (histogram (mapcar #'flatten (select sim :fields '(best-tricks) ))))
-
-;;(print-hist (histogram (select sim :fields '(partner-clubs) )))
-
-;;(select sim :fields '(hand))
-;;(show-deals sim '(= best-tricks 12))
-
-;;(simdeal ' (((11) (0 4 8 11) (0 1 2 8 11) (4 7 11))
-;;     ((2 3 5 8 12) (2 7 10) (4 10) (1 3 5))
-;;     ((0 1 6 7) (3 5 12) (3 5 7 12) (8 12))
-;;     ((4 9 10) (1 6 9) (6 9) (0 2 6 9 10))))
-
 (defun line-hcp (trump &rest hands)
     (declare (ignore trump))
     (apply #'+ (mapcar #'rank-hcp (flatten (append (first hands) (third hands))))))
@@ -1715,7 +1702,6 @@
                                    :fallback-params '(:! (deal-all 13 (all-cards))
                                                       := (line-hcp best-tricks))))
 
-;;(print-hist (histogram (select simhcp)))
 
 (defun hist-plot (histogram &key (cmd "plot") params (out T))
     (flet ((rcode (funname histnode)
@@ -1727,40 +1713,4 @@
                 (if params (format nil ",~A" params)
                     "")))))
       (rcode cmd histogram)))
-
-
-;; plot showing how NT trick probabilities change depending on hcp on line
-;;(let ((h (histogram (select simhcp))))
-;;  (hist-plot (nthcdr 2 (nth 0 h)) :params "pch=0, xlim=c(7,13), ylim=c(0,0.5)" :out T)
-;;  (loop for i from 1 to 20
-;;        do (hist-plot (nthcdr 2 (nth i h)) :cmd "lines" :out T
-;;                      :params (format nil "pch=~a" i))))
-;;
-
-;; plot showing how average NT tricks change depending on hcp on line
-;;(let* ((h (sort (histogram (select simhcp)) (lambda (a b) (< (car? (first a)) (car? (first b))))))
-;;       (hcps (mapcar (f* #'first #'car?) h))
-;;       (avgs (mapcar (lambda (case)
-;;                        (if (listp (first case))
-;;                            (second (first case))
-;;                            (apply #'+ (mapcar (curry #'apply #'*)
-;;                                               (nthcdr 2 case)))))
-;;             h)))
-;;    (format T "hcps=c(~{~A~^,~}); avgs=c(~{~,7f~^,~}); plot(hcps, avgs, type='b');~%"
-;;              hcps avgs))
-
-
-;; plot showing how HCP-trick ratio change with HCP
-;;(let* ((h (sort (histogram (select simhcp)) (lambda (a b) (< (car? (first a)) (car? (first b))))))
-;;       (hcps (mapcar (f* #'first #'car?) h))
-;;       (avgs (mapcar (lambda (case)
-;;                        (if (listp (first case))
-;;                            (second (first case))
-;;                            (apply #'+ (mapcar (curry #'apply #'*)
-;;                                               (nthcdr 2 case)))))
-;;             h)))
-;;    (format T "hcp=c(~{~A~^,~}); tph=c(~{~,7f~^,~}); plot(hcps, tph, type='b');~%"
-;;               hcps (loop for hcp in hcps
-;;                          for avg in avgs
-;;                          collect (float (/ avg hcp)))))
 
