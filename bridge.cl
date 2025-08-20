@@ -753,7 +753,7 @@
                 (if (nthcdr 2 entry) (print-hist (nthcdr 2 entry) (+ indent 1))))))
 
 (defun suit-distribution (hand)
-    (sort (mapcar #'length hand) #'<))
+    (sort (mapcar #'length hand) #'>))
 
 (defun fit-n-distrib (trump)
     (list (lambda (hand)
@@ -881,14 +881,14 @@
      (cards :reader cards)
      (remaining :reader remaining)))
 
-(defmethod initialize-instance ((self trick) &key suit trump high winner)
+(defmethod initialize-instance ((self trick) &key suit trump high winner remaining)
     (setf (slot-value self 'high) (if (listp high) (or high (list (normsuit suit) -1))
                                                    (list (normsuit suit) high)))
     (setf (slot-value self 'suit) (normsuit suit))
     (setf (slot-value self 'trump) (normsuit trump))
     (setf (slot-value self 'winner) (or winner -1))
     (setf (slot-value self 'cards) nil)
-    (setf (slot-value self 'remaining) nil))
+    (setf (slot-value self 'remaining) remaining))
 
 (defmethod print-object ((self trick) out)
     (with-slots (high suit trump winner remaining) self
@@ -984,13 +984,55 @@
                                                     (cons (second ans)
                                                           (subseq suits (+ suit 1)))))))))))
 
-(defmethod weak-suit ((self hand) &key trump)
-    (first (fold (lambda (acc val)
-                    (let-from* val (suit rank)
-                        (if (and (not (eq trump suit))
-                                 (< rank (second acc))) val acc)))
-                 '(0 13)
-                 (zip-id (mapcar (curry #'apply #'min?) (suits self))))))
+(defmethod weak-suit ((self hand) trick)
+    (with-slots (trump remaining) trick
+        (first (fold (lambda (acc val)
+                        (let-from* val (suit cards)
+                           (let-from* acc (accsuit accards)
+                               (cond ((not cards) acc)
+                                     ((not acc) val)
+                                     ((eq suit trump) acc)
+                                     ((eq accsuit trump) val)
+                                     ((and (not (find-if (curry #'< 8) cards))
+                                           (not (find-if (curry #'< 8) accards)))
+                                          (if (< (length cards) (length accards))
+                                              val acc))
+                                     ((not (find-if (curry #'< 8) cards)) val)
+                                     ((not (find-if (curry #'< 8) accards)) acc)
+                                     (t (let* ((rem-a (apply #'append (mapcar (curry #'nth suit) remaining)))
+                                               (rem-b (apply #'append (mapcar (curry #'nth accsuit) remaining)))
+                                               (buffer-a (- (length cards)
+                                                            (length (filter (curry #'< (apply #'max cards))
+                                                                            rem-a))))
+                                               (buffer-b (- (length accards)
+                                                            (length (filter(curry #'< (apply #'max accards))
+                                                                                    rem-b)))))
+                                            (cond ((= buffer-a buffer-b)
+                                                      (if (< (car cards) (car accards))
+                                                          val acc))
+                                                  ((or (and (> buffer-a 0)
+                                                            (> buffer-b 0))
+                                                       (and (< buffer-a 0)
+                                                            (< buffer-b 0)))
+                                                      (if (> buffer-a buffer-b) val acc))
+                                                  ((> buffer-a 0) val)
+                                                  (t acc))))))))
+                     nil
+                     (zip-id (suits self))))))
+
+(test (weak-suit (make-instance 'hand := '((2 3) (1 2 4 11) (6 9) (0 1 3)))
+                 (make-instance 'trick :remaining '(((6 7) (3 5 12) (3 5 7 12) (8 12))
+                                                    ((2 3) (1 2 4 11) (6 9) (0 1 3))
+                                                    (NIL (0 6 7 8) (1 10) (2 5 6 7 11))
+                                                    ((10) (9 10) (0 2 4 8 11) (4 9 10)))))
+      0 eq)
+
+(test (weak-suit (make-instance 'hand := '(() (4 11) () (1 10)))
+                 (make-instance 'trick :remaining '((() (5 12) () (0 8))
+                                                    (() (4 11) () (1 10))
+                                                    (NIL (7 8) () (6 7))
+                                                    (() (9 10) () (3 9)))))
+      3 eq)
 
 (defun lowest-card (cards)
     (list (car cards) (cdr cards)))
@@ -1003,7 +1045,7 @@
                                 (play hand trump (lambda (cards)
                                                     (let ((ans (position-if (curry #'< hrank) cards)))
                                                        (if ans (take ans cards)))))
-                                (play hand (weak-suit hand :trump trump) #'lowest-card)
+                                (play hand (weak-suit hand trick) #'lowest-card)
                                 (if trump (play hand trump #'lowest-card))))
 
                          ((and hsuit (eq hsuit suit))
@@ -1012,7 +1054,7 @@
                                                                      :use-highest use-highest)
                                                         (lowest-card cards))))
                                 (and trump (play hand trump #'lowest-card))
-                                (play hand (weak-suit hand :trump trump) #'lowest-card)
+                                (play hand (weak-suit hand trick) #'lowest-card)
                                 (if trump (play hand trump #'lowest-card))))
 
                          (t (or (play hand suit (lambda (cards)
@@ -1020,7 +1062,7 @@
                                                                      :use-highest use-highest)
                                                         (lowest-card cards))))
                                 (and trump (play hand trump #'lowest-card))
-                                (play hand (weak-suit hand :trump trump) #'lowest-card)
+                                (play hand (weak-suit hand trick) #'lowest-card)
                                 (if trump (play hand trump #'lowest-card)))))
                    (high remaining)
               (if remaining (play trick high remaining))))))
@@ -1147,7 +1189,7 @@
                                         (let ((h2-max (or (apply #'max (nth trump (suits h2))) -1)))
                                             (play h1 trump (curry #'take-match (andf (curry #'< hrank)
                                                                                      (curry #'< h2-max))))))
-                                    (play h1 (weak-suit h1) #'lowest-card)))
+                                    (play h1 (weak-suit h1 trick) #'lowest-card)))
                              ((and hsuit (eq hsuit suit))
                                 (or (if (nth suit (suits h2))
                                         (let ((h2-max (apply #'max (nth suit (suits h2)))))
@@ -1164,7 +1206,7 @@
                                         (if (not (winnerp? trick))
                                             (play h1 trump #'lowest-card)))
 
-                                    (play h1 (weak-suit h1) #'lowest-card)))
+                                    (play h1 (weak-suit h1 trick) #'lowest-card)))
                              (t (or (if (nth suit (suits h2))
                                         (let ((h2-max (apply #'max (nth suit (suits h2)))))
                                            (play h1 suit (curry #'take-match (curry #'< h2-max)))))
@@ -1177,7 +1219,7 @@
                                         (if (not (winnerp? trick))
                                             (play h1 trump #'lowest-card)))
 
-                                    (play h1 (weak-suit h1) #'lowest-card))))
+                                    (play h1 (weak-suit h1 trick) #'lowest-card))))
                    (high remaining)
                 (if remaining (play trick high remaining))))))
 
@@ -1223,12 +1265,11 @@
       '((0 1) ((10) () (4 6) (3 6 8 12)))
       equal)
 
-; TODO: Finesse-if-possible shouldn't beat partners card.
-;(test (as-list (finesse-if-possible (make-instance 'trick :suit 'D :trump 'C :high 11 :winner 0)
-;                                    (make-instance 'hand := '((1 10) () (4 6) (3 6 8 12)))
-;                                    (make-instance 'hand := '((0 9 11) (9 10) (5 8 11) (5 9 10 11)))))
-;      '((3 3) ((1 10) () (4 6) (6 8 12)))
-;      equal)
+(test (as-list (finesse-if-possible (make-instance 'trick :suit 'D :trump 'C :high 11 :winner 0)
+                                    (make-instance 'hand := '((1 10) () (4 6) (3 6 8 12)))
+                                    (make-instance 'hand := '((0 9 11) (9 10) (5 8 11) (5 9 10 11)))))
+      '((3 3) ((1 10) () (6) (3 6 8 12)))
+      equal)
 
 (test (as-list (finesse-if-possible (make-instance 'trick :suit 'D)
                                     (make-instance 'hand := '((1 10) (4 5 8 11) (4 6) (3 6 8 12)))
@@ -1459,7 +1500,7 @@
                                      '((1 10) (4 5 8 10 12) (4 6) (3 6 8))
                                      '((0 9 11) (2 7 9) (5 8 11) (9 10 11))))
       '(-1 ((4 6) (1) (0 1 2 9 10 12) (4 7)) 
-           ((2 3 5 7 8 12) (3 6 11) (3 7) NIL)
+           ((2 3 5 7 8 12) (0 3 6 11) (7) NIL)
            ((1 10) (4 5 8 10 12) (4 6) (6 8))
            ((0 9 11) (2 7 9) (5 8 11) (10 11)))
       equal)
@@ -1570,9 +1611,9 @@
                                '(c d h s))))))
             (run cache declarer left dummy right)))
 
-(defun simdeal (deal)
+(defun simdeal (deal &key trump)
     (print-deal deal '(n e s w))
-    (let-from! (apply 'play-deal (cons 'h deal))
+    (let-from! (apply 'play-deal (cons trump deal))
                (winners tricks)
         (format t "winners: ~A~%" winners)
         (loop for trick in tricks
@@ -1630,7 +1671,7 @@
         (let ((pred (sublis (loop for i from 0
                                      for sym in (cons 'hand props)
                                      collect `(,sym . (nth ,i row)))
-                    exp)))
+                        exp)))
             (filter (eval `(lambda (row) ,pred)) data))))
 
 (defmethod select ((self mc-case) &key fields filter)
@@ -1646,8 +1687,8 @@
                        (mapcar #'cdr source)))))
 
 (defmethod show-deals ((self mc-case) filter)
-    (loop for deal in (choose sim filter)
-      do (print-deal (car deal))))
+    (loop for deal in (choose self filter)
+      do (print-deal (peek (car deal)))))
 
 (defmethod save ((self mc-case) filename)
     (with-open-file (out filename
@@ -1685,7 +1726,7 @@
         (self (reverse (seektree '(0 0) hands)))))
 
 (defparameter sim (load-mc-case "sim.dat"
-                                :sim-count 10
+                                :sim-count 10000
                                 :fallback-params '(:= (partner-clubs untrump-balance best-tricks)
                                                    :! (reorder (gen-partner-deal
                                                                      '((9 8 3 2) (A 7 5) (A 9 7 5) (A 10))

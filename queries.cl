@@ -2,7 +2,19 @@
 (select sim :fields '(hand))
 
 ;; Show deals from given simulation, with expected tricks = 12
-(show-deals sim '(= best-tricks 12))
+(show-deals sim '(= best-tricks 10))
+
+;; TODO: fix case
+(simdeal '(((5 10 11 12) (8) (0 1 4 9 10) (0 1 6))
+     ((2 3 9) (0 6 9 11) (6) (3 7 9 10 11))
+     ((0 1 6 7) (3 5 12) (3 5 7 12) (8 12))
+     ((4 8) (1 2 4 7 10) (2 8 11) (2 4 5))))
+
+;; TODO: fix this case
+(simdeal '(((5 12) (0 7 9) (1 4 6 8 11) (5 9 11))
+     ((4 8 10) (4 8) (0 2 10) (0 3 4 7 10))
+     ((0 1 6 7) (3 5 12) (3 5 7 12) (8 12))
+     ((2 3 9 11) (1 2 6 10 11) (9) (1 2 6))))
 
 ;;Print histograms for given fields of particular deal
 (print-hist (histogram (mapcar #'flatten (select sim :fields '(untrump-balance) ))))
@@ -14,7 +26,6 @@
      ((2 3 5 8 12) (2 7 10) (4 10) (1 3 5))
      ((0 1 6 7) (3 5 12) (3 5 7 12) (8 12))
      ((4 9 10) (1 6 9) (6 9) (0 2 6 9 10))))
-
 
 ;; Print histogram for hcp-tricks relation
 (print-hist (histogram (select simhcp)))
@@ -53,3 +64,9 @@
                           for avg in avgs
                           collect (float (/ avg hcp)))))
 
+(show-deals simhcp '(= line-hcp 25))
+
+(simdeal '(((1 2 3 7 12) (0 8 12) (0 10) (3 4 11))
+     ((4 8 11) (5 6 11) (2 3 4 9 11) (1 9))
+     ((0 5) (3 4 10) (6 8 12) (0 5 6 10 12))
+     ((6 9 10) (1 2 7 9) (1 5 7) (2 7 8))))
