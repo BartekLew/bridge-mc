@@ -65,6 +65,12 @@
         (format T "> ~A~%  = ~A~%" ',body ans)
         ans))
         
+(defmacro measure-time (body)
+    `(let ((start-time (get-universal-time))
+           (ans ,body))
+         (format t "TIME(~A) = ~A" ',body (- (get-universal-time) start-time))
+         ans))
+
 (defun filter (pred lst &optional acc)
     (if (not lst) (reverse acc)
         (letcar lst
@@ -205,9 +211,10 @@
                 (self weights target 0)))))
 
 (defun roll (amount lst)
-    (let ((a (mod (- amount) (length lst))))
-        (if (= a 0) lst
-            (append (subseq lst a) (subseq lst 0 a)))))
+    (if lst
+        (let ((a (mod (- amount) (length lst))))
+            (if (= a 0) lst
+                (append (subseq lst a) (subseq lst 0 a))))))
 
 (test (roll 2 '(10 100 15 5))
       '(15 5 10 100)
@@ -975,6 +982,20 @@
 (defmethod print-object ((self hand) out)
     (format out "HAND<~A>" (suits self)))
 
+(defmethod hand-suit ((self hand) suit)
+    (nth (suitno suit) (suits self)))
+
+(defmethod beats? ((a hand) (b hand) suit trump)
+    (let ((acards (nth (suitno suit) (suits a)))
+          (bcards (nth (suitno suit) (suits b)))
+          (atrumps (and trump (nth (suitno trump) (suits a))))
+          (btrumps (and trump (nth (suitno trump) (suits b)))))
+       (cond ((and acards bcards) (> (apply #'max acards) (apply #'max bcards)))
+             ((and (not acards) (not bcards) atrumps btrumps)
+                  (> (apply #'max atrumps) (apply #'max btrumps)))
+             ((and (not acards) atrumps) T)
+             (T nil))))
+
 (defmethod play ((self hand) suit (chooser function))
     (with-slots (suits) self 
         (let ((played (nth suit suits)))
@@ -1199,11 +1220,11 @@
                                         (play h1 suit (curry #'take-match (curry #'< hrank))))
                                     (play h1 suit #'lowest-card)
 
-                                    (if (and (not (nth suit (suits h2)))
+                                    (if (and trump (not (nth suit (suits h2)))
                                              (nth trump (suits h2)))
                                         (let ((h2-max (apply #'max (nth trump (suits h2)))))
                                             (play h1 trump (curry #'take-match (curry #'< h2-max))))
-                                        (if (not (winnerp? trick))
+                                        (if (and trump (not (winnerp? trick)))
                                             (play h1 trump #'lowest-card)))
 
                                     (play h1 (weak-suit h1 trick) #'lowest-card)))
@@ -1212,11 +1233,11 @@
                                            (play h1 suit (curry #'take-match (curry #'< h2-max)))))
                                     (play h1 suit #'lowest-card)
 
-                                    (if (and (not (nth suit (suits h2)))
+                                    (if (and trump (not (nth suit (suits h2)))
                                              (nth trump (suits h2)))
                                         (let ((h2-max (apply #'max (nth trump (suits h2)))))
                                             (play h1 trump (curry #'take-match (curry #'< h2-max))))
-                                        (if (not (winnerp? trick))
+                                        (if (and trump (not (winnerp? trick)))
                                             (play h1 trump #'lowest-card)))
 
                                     (play h1 (weak-suit h1 trick) #'lowest-card))))
@@ -1268,7 +1289,7 @@
 (test (as-list (finesse-if-possible (make-instance 'trick :suit 'D :trump 'C :high 11 :winner 0)
                                     (make-instance 'hand := '((1 10) () (4 6) (3 6 8 12)))
                                     (make-instance 'hand := '((0 9 11) (9 10) (5 8 11) (5 9 10 11)))))
-      '((3 3) ((1 10) () (6) (3 6 8 12)))
+      '((2 4) ((1 10) () (6) (3 6 8 12)))
       equal)
 
 (test (as-list (finesse-if-possible (make-instance 'trick :suit 'D)
@@ -1587,29 +1608,77 @@
         (let ((hit (gethash args hits)))
             (if hit hit
                 (let ((ans (apply action (cons self args))))
-                    (if (and (not ans) (not (equal args '(nil nil nil nil))))
-                        (format t "~A => NIL~%" args))
                     (setf (gethash args hits) ans)
                     ans)))))
 
+(defun immediate-tricks (cache trump a b c d)
+    (fold (lambda (acc card)
+             (let ((trick (make-trick (car card) trump
+                             (beat-or-low trick a :use-highest (second card))
+                             (if (beats? d c (car card) trump) (beat-or-low trick b)
+                                              (finesse-if-possible trick b c))
+                             (finesse-if-possible trick c d)
+                             (beat-or-low trick d))))
+                (or (if (= (mod (winner trick) 2) 0)
+                       (let ((following (apply #'run (append (list cache trump)
+                                                     (roll (winner trick)
+                                                           (mapcar (curry #'make-instance 'hand :=) (remaining trick)))))))
+                          (if (< (length (car acc)) (+ (length (car following)) 1))
+                            (list (cons (cards trick) (first following))
+                                  (second following)))))
+                    acc)))
+          `(nil (,a ,b ,c ,d))
+          (loop for suit in '(c d h s)
+                for cards in (suits a)
+                append (mapcar (curry #'list suit)
+                               (cond ((eq suit trump)
+                                         (if cards (let ((btrumps (hand-suit b trump))
+                                                         (dtrumps (hand-suit d trump)))
+                                                      (if (or btrumps dtrumps)
+                                                          (if (> (length cards) 1) (list nil t) (list nil))))))
+                                     (cards
+                                        (if (< (length cards) 2) (list nil)
+                                                                 (list nil T))))))))
+
 (defun play-deal (trump declarer left dummy right)
     (let ((cache (make-instance 'cache :! 
-                    (lambda (cache dec l dum r)
-                        (fold (lambda (acc suit)
-                                  (let ((trick (play-round suit trump dec l dum r)))
-                                     (if trick (let-from! (apply #'run (cons cache (remaining trick)))
-                                                          (ns nt)
-                                                  (let ((newscore (if (> (score trick) 0)
-                                                                      (+ (score trick) ns)
-                                                                      ns)))
-                                                    (if (or (not acc) (> newscore (car acc)))
-                                                      (list newscore
-                                                            (cons (cons (winner trick)(cards trick) ) nt))
-                                                      acc)))
-                                         (list 0 nil))))
-                               nil
-                               '(c d h s))))))
-            (run cache declarer left dummy right)))
+                    (lambda (cache a b c d)
+                        (fold (lambda (acc card)
+                                  (let ((trick (make-trick (car card) trump
+                                                   (beat-or-low trick (make-instance 'hand := a)
+                                                                :use-highest (second card))
+                                                   (beat-or-low trick (make-instance 'hand := b))
+                                                   (finesse-if-possible trick (make-instance 'hand := c)
+                                                                              (make-instance 'hand := d))
+                                                   (beat-or-low trick (make-instance 'hand := d)))))
+                                     (let-from! (apply #'run (cons cache (roll (- (winner trick))
+                                                                               (remaining trick))))
+                                                (cscore ctricks)
+                                         (let ((score (loop for a in (roll (winner trick) '(1 0))
+                                                            for b in (roll (winner trick) (or cscore '(0 0)))
+                                                            collect (+ a b))))
+                                            (if (or (not acc)
+                                                    (> (car score) (seektree '(0 0) acc)))
+                                                (list score (cons (cards trick) ctricks))
+                                                acc)))))
+                              nil
+                              (loop for suit in '(c d h s)
+                                    for cards in a
+                                    append (mapcar (curry #'list suit)
+                                                   (if cards
+                                                       (if (< (length cards) 2) (list nil)
+                                                                                (list nil T))))))))))
+            (let-from! (peek (run cache left dummy right declarer))
+                       (score tricks)
+                ;(if (not (= (apply #'+ score) 13))
+                ;    (error 'error :message "internal error, tricks don't sum to 13"))
+                (loop for key being the hash-keys of (slot-value cache 'hits)
+                      for value being the hash-values of (slot-value cache 'hits)
+                      for i from 0
+                      do (progn (format t "======= ~A ======~%" i)
+                                (print-deal key)
+                                (format t " ==> ~A~%~A~%" (car value) (second value))))
+                (list (second score) tricks))))
 
 (defun simdeal (deal &key trump)
     (print-deal deal '(n e s w))
@@ -1617,7 +1686,7 @@
                (winners tricks)
         (format t "winners: ~A~%" winners)
         (loop for trick in tricks
-              do (format t "~{~A ~}/~A~%" (mapcar #'cardstr (cdr trick)) (car trick)))))
+              do (format t "~{~A ~}~%" (mapcar #'cardstr trick)))))
 
 (defun dump-chosen (fn test printer)
     (lambda (&rest args)

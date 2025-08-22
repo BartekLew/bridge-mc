@@ -10,12 +10,27 @@
      ((0 1 6 7) (3 5 12) (3 5 7 12) (8 12))
      ((4 8) (1 2 4 7 10) (2 8 11) (2 4 5))))
 
+(measure-time (simdeal '(((1 2 3) (0 12) (1) ())
+                         ((10 11 12) (11) (0) (0))
+                         ((0) (1) (10 11 12) (1))
+                         ((4 5 6) () (2) (11 12)))))
+
 ;; TODO: fix this case
 (simdeal '(((5 12) (0 7 9) (1 4 6 8 11) (5 9 11))
      ((4 8 10) (4 8) (0 2 10) (0 3 4 7 10))
      ((0 1 6 7) (3 5 12) (3 5 7 12) (8 12))
      ((2 3 9 11) (1 2 6 10 11) (9) (1 2 6))))
 
+(defun simdeal (deal &key trump)
+    (print-deal deal '(n e s w))
+    (let-from! (apply (curry #'run (make-instance 'cache :! #'immediate-tricks) trump)
+                      (mapcar (curry #'make-instance 'hand :=) deal))
+               (tricks remaining)
+        (format t "winners: ~A~%" (length tricks))
+        (loop for trick in tricks
+              do (format t "~{~A ~}~%" (mapcar #'cardstr trick)))
+        (print-deal (mapcar #'suits remaining))))
+                                
 ;;Print histograms for given fields of particular deal
 (print-hist (histogram (mapcar #'flatten (select sim :fields '(untrump-balance) ))))
 (print-hist (histogram (mapcar #'flatten (select sim :fields '(best-tricks) ))))
