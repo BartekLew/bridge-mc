@@ -10,37 +10,33 @@
      ((0 1 6 7) (3 5 12) (3 5 7 12) (8 12))
      ((4 8) (1 2 4 7 10) (2 8 11) (2 4 5))))
 
-(measure-time (simdeal '(((1 2 3) (0 12) (1) ())
-                         ((10 11 12) (11) (0) (0))
-                         ((0) (1) (10 11 12) (1))
-                         ((4 5 6) () (2) (11 12)))))
-
 ;; TODO: fix this case
 (simdeal '(((5 12) (0 7 9) (1 4 6 8 11) (5 9 11))
      ((4 8 10) (4 8) (0 2 10) (0 3 4 7 10))
      ((0 1 6 7) (3 5 12) (3 5 7 12) (8 12))
-     ((2 3 9 11) (1 2 6 10 11) (9) (1 2 6))))
+     ((2 3 9 11) (1 2 6 10 11) (9) (1 2 6))) :trump 'h)
 
-(defun simdeal (deal &key trump)
-    (print-deal deal '(n e s w))
-    (let-from! (apply (curry #'run (make-instance 'cache :! #'immediate-tricks) trump)
-                      (mapcar (curry #'make-instance 'hand :=) deal))
-               (tricks remaining)
-        (format t "winners: ~A~%" (length tricks))
-        (loop for trick in tricks
-              do (format t "~{~A ~}~%" (mapcar #'cardstr trick)))
-        (print-deal (mapcar #'suits remaining))))
-                                
 ;;Print histograms for given fields of particular deal
 (print-hist (histogram (mapcar #'flatten (select sim :fields '(untrump-balance) ))))
 (print-hist (histogram (mapcar #'flatten (select sim :fields '(best-tricks) ))))
 (print-hist (histogram (mapcar #'flatten (select sim :fields '(partner-clubs) ))))
 
 ;; Perform simulation for given deal
-(simdeal ' (((11) (0 4 8 11) (0 1 2 8 11) (4 7 11))
+(simdeal '(((11) (0 4 8 11) (0 1 2 8 11) (4 7 11))
      ((2 3 5 8 12) (2 7 10) (4 10) (1 3 5))
      ((0 1 6 7) (3 5 12) (3 5 7 12) (8 12))
-     ((4 9 10) (1 6 9) (6 9) (0 2 6 9 10))))
+     ((4 9 10) (1 6 9) (6 9) (0 2 6 9 10))) :trump 'h)
+
+(apply (curry #'suit-tricks 'H 'C)
+    (peek (mapcar #'mkhand '(((11) (0 4 8 11) (0 1 2 8 11) (4 7 11))
+        ((2 3 5 8 12) (2 7 10) (4 10) (1 3 5))
+         ((0 1 6 7) (3 5 12) (3 5 7 12) (8 12))
+         ((4 9 10) (1 6 9) (6 9) (0 2 6 9 10))))))
+
+(simdeal '(((0 1 2 3 10 11 12) (0) (0 1 12) (0 1))
+           ((7 8 9) (1 5 6 7 12) (8 9 10) (5 6))
+           (nil (2 3 9 10) (2 3 4 11) (2 3 4 10 11))
+           ((4 5 6) (4 8 11) (5 6 7) (7 8 9 12))) :trump 'C)
 
 ;; Print histogram for hcp-tricks relation
 (print-hist (histogram (select simhcp)))
@@ -52,6 +48,27 @@
         do (hist-plot (nthcdr 2 (nth i h)) :cmd "lines" :out T
                       :params (format nil "pch=~a" i))))
 
+;; That takes too long if there are too many immediate tricks
+(peek (cons 'h (mapcar (f* #'hand #'mkhand) '(((H 11) (H 2) (H 0) (H 4) (H 8) (C 12) (C 11) (C 10) (C 5) (S 0) (C 2)
+      (S 5) (C 8))
+     ((H 9) (D 6) (C 4) (H 6) (D 9) (S 2) (C 3) (H 1) (D 4) (D 8) (C 9) (S 1)
+      (H 10))
+     ((C 7) (C 6) (C 1) (C 0) (D 12) (D 5) (D 3) (H 12) (H 7) (H 5) (H 3)
+      (S 12) (S 8))
+     ((S 10) (D 2) (D 11) (D 1) (S 11) (D 10) (S 9) (D 0) (S 7) (S 3) (D 7)
+      (S 4) (S 6))))))
+
+(apply (curry #'find-opp-weakness nil)
+       (peek (mapcar (f* #'hand #'mkhand)
+              '(((H 11) (H 2) (H 0) (H 4) (H 8) (C 12) (C 11) (C 10) (C 5) (S 0) (C 2)
+      (S 5) (C 8))
+     ((H 9) (D 6) (C 4) (H 6) (D 9) (S 2) (C 3) (H 1) (D 4) (D 8) (C 9) (S 1)
+      (H 10))
+     ((C 7) (C 6) (C 1) (C 0) (D 12) (D 5) (D 3) (H 12) (H 7) (H 5) (H 3)
+      (S 12) (S 8))
+     ((S 10) (D 2) (D 11) (D 1) (S 11) (D 10) (S 9) (D 0) (S 7) (S 3) (D 7)
+      (S 4) (S 6))))))
+      
 ;; plot showing how average NT tricks change depending on hcp on line
 (let* ((h (sort (histogram (select simhcp)) (lambda (a b) (< (car? (first a)) (car? (first b))))))
        (hcps (mapcar (f* #'first #'car?) h))
