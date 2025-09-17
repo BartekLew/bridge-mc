@@ -76,6 +76,11 @@
         (format T "> ~A~%  = ~A~%" ',body ans)
         ans))
         
+(defmacro peek-if (test body)
+    `(let ((ans ,body))
+        (if ,test (format T "> ~A~%  = ~A~%" ',body ans))
+        ans))
+        
 (defun pass-if (test value)
     (if (funcall test value) value))
 
@@ -103,6 +108,13 @@
         (let ((ans (if args (apply (car funs) args))))
             (loop for f in (cdr funs)
                   do (setf ans (if ans (funcall f ans))))
+            ans)))
+
+(defun f** (&rest funs)
+    (lambda (&rest args)
+        (let ((ans (if args (apply (car funs) args))))
+            (loop for f in (cdr funs)
+                  do (setf ans (funcall f ans)))
             ans)))
 
 (test (filter (curry #'< 3) '(1 2 3 4 5 4 3 2 1)) '(4 5 4) equal)
@@ -1563,6 +1575,7 @@
                           for b in (if (eq (mod roll 2) 1) (reverse (score other))
                                                            (score other))
                           collect (+ a b)))
+        (setf roll (slot-value other 'roll))
         (setf remaining (remaining other)))
     self)
 
@@ -1829,12 +1842,6 @@
         ((0 12) (0 3) (0 1) (0 8)))
       equal)
 
-(let ((a (make-instance 'hand := '((0 5 10 11 12) () (0 1 4 9 10) (0 1 6))))
-            (b (make-instance 'hand := '((2 3 9) (0 6 9 11) (6) (3 7 9 10 11))))
-            (c (make-instance 'hand := '((1 6 7) (3 5 8 12) (3 5 7 12) (8 12))))
-            (d (make-instance 'hand := '((4 8) (1 2 4 7 10) (2 8 11) (2 4 5)))))
-    (tricks (car (suits (make-instance 'deal-plan := (list a b c d) :trump 'h)))))
-
 (defun immediate-tricks (cache trump a b c d &key (suits '(c d h s)))
     (fold (lambda (acc card)
             (best-outcome 
@@ -2024,22 +2031,23 @@
         ((0 5) (2 6) (0 7) (3 4)) ((2 3) (2 11) (2 0) (3 3)))
       equal)
 
-(defun play-deal (trump declarer left dummy right)
+(defun play-deal (trump declarer left dummy right &key peek-nodes)
     (let* ((cache (make-instance 'cache :! #'immediate-tricks))
            (defence (make-instance 'play-strategy :trump trump :hands (list left dummy right declarer)))
            (attack (make-instance 'play-strategy :trump trump :hands (list declarer left dummy right))))
        (labels ((play-step (strategy opp-strategy a b c d)
-                    (let ((any-suit (position-if #'id (suits a))))
+                    (let ((any-suit (position-if #'id (suits a)))
+                          (peek-cond (and peek-nodes (funcall peek-nodes a b c d))))
                         (if any-suit
-                            (best-outcome (do-next (play-strategy strategy cache a b c d)
-                                                   (curry #'play-step strategy opp-strategy)
-                                                   (curry #'play-step opp-strategy strategy))
-                                          (do-next (mk-route (play-routes trump a b c d) a b c d)
-                                                   (curry #'play-step strategy opp-strategy)
-                                                   (curry #'play-step opp-strategy strategy))
-                                          (do-next (simple-trick trump any-suit a b c d)
-                                                   (curry #'play-step strategy opp-strategy)
-                                                   (curry #'play-step opp-strategy strategy)))
+                            (let ((options (loop for action in (list (curry #'play-strategy strategy cache)
+                                                                     (curry #'mk-route
+                                                                            (play-routes trump a b c d))
+                                                                     (curry #'simple-trick trump any-suit))
+                                                 collect (peek-if peek-cond
+                                                                  (do-next (apply action (list a b c d))
+                                                                           (curry #'play-step strategy opp-strategy)
+                                                                           (curry #'play-step opp-strategy strategy))))))
+                               (peek-if peek-cond (apply #'best-outcome options)))
                             (make-instance 'outcome :remaining (list a b c d))))))
           (play-step defence attack left dummy right declarer))))
 
@@ -2049,10 +2057,11 @@
                               (make-instance 'hand := '((4 8) (1 2 4 7 10) (2 8 11) (2 4 5)))))
       '(((1 0) (1 12) (1 1) (1 8)) ((0 0) (0 4) (0 10) (0 2))
         ((0 12) (0 3) (0 1) (0 8)) ((0 11) (0 9) (0 6) (3 2))
-        ((0 5) (2 6) (0 7) (3 4)) ((2 3) (2 11) (2 0) (3 3)) ((1 2) (3 0) (1 6) (1 3))
-        ((1 9) (1 5) (1 4) (3 1)) ((1 11) (2 5) (1 7) (3 6))
-        ((3 7) (3 12) (3 5) (2 1)) ((2 12) (2 2) (2 4) (3 9))
-        ((2 7) (2 8) (2 9) (3 10)) ((2 10) (3 11) (3 8) (1 10)))
+        ((0 5) (2 6) (0 7) (3 4)) ((1 3) (1 4) (3 0) (1 6))
+        ((1 9) (1 5) (1 2) (3 1)) ((1 11) (2 3) (1 7) (3 6))
+        ((3 3) (3 8) (3 5) (2 0)) ((2 5) (2 11) (2 1) (3 7))
+        ((1 10) (2 4) (3 9) (2 7)) ((2 2) (2 9) (3 10) (2 12))
+        ((3 12) (2 8) (2 10) (3 11)))
       equal)
 
 (defun simdeal (deal &key trump)
