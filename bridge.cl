@@ -237,6 +237,22 @@
         (4 A) (4 B) (4 C) (4 D))
       equal)
 
+(defun list- (a b &key (test #'eq))
+    (filter (f** (curry* #'position (x) (x b :test test)) #'not)
+            a))
+
+(test (list- '(foo 2 3 (3 5) (100 22)) '(foo fo (5 4) (3 5)) :test #'equal)
+      '(2 3 (100 22))
+      equal)
+
+(test (list- '(1 2 3 4) '(4 3 2 1))
+      nil
+      equal)
+
+(test (list- '(foo 2 3 (3 5) (100 22)) '(foo fo (5 4) (3 5)))
+      '(2 3 (3 5) (100 22))
+      equal)
+
 (defun fold (fn val lst)
     (if (not lst) val
         (fold fn (apply fn (list val (car lst))) (cdr lst))))
@@ -1725,16 +1741,49 @@
                                            (beat-or-low trick (fourth hands)))))))
                (if (and ans (won? ans)) ans (reproduce route hands trump))))))
                 
+(defmethod rem-break-div ((self play-route) trump cards)
+    (with-slots (tricks from to to-suit-void) self
+        (let ((break-cards (if (not from) (mapcar #'third tricks)))
+              (remove-cards (cond ((not from) (mapcar (f* #'first #'list) tricks))
+                                  ((eq from to) (mapcar (f* #'first #'list) tricks))
+                                  (t (mapcar (curry* #'reorder (lst) (lst '(0 2))) tricks)))))
+            (divlist (list #'third #'second) 
+                    (mapcar (lambda (card) 
+                              (let* ((break-id (position card break-cards :test #'equal))
+                                     (rem-id (position-if (curry* #'position (rc) (card rc :test #'equal))
+                                                          remove-cards)))
+                                 (list card break-id rem-id)))
+                            cards)
+                    :map (lambda* (a b c)
+                            (list a (or b c)))))))
+
+(defmethod del-at ((self play-route) ids)
+    (with-slots (from to to-suit-void tricks) self
+        (make-instance 'play-route :from from :to to 
+                       :to-suit-void to-suit-void
+                       :tricks (loop for tr in tricks
+                                     for tid from 0
+                                     append (if (position tid ids) nil (list tr))))))
+                       
+(defmethod add-at ((self play-route) new-tricks)
+    (with-slots (from to to-suit-void tricks) self
+        (make-instance 'play-route :from from :to to 
+                       :to-suit-void to-suit-void
+                       :tricks (append tricks new-tricks))))
+
 (defclass play-com ()
-    ((trump :initarg :trump :reader trump)
+    ((zero-id :initarg :zero-id :reader zero-id)
+     (trump :initarg :trump :reader trump)
      (active :initarg :active :reader active)
-     (pending :initarg :pending :reader pending)))
+     (pending :initarg :pending :reader pending)
+     (guards :initarg :guards :initform nil :reader guards)))
  
 (defmethod print-object ((self play-com) out)
-    (with-slots (active pending) self
-        (format out "PLAY-COM<~A /~%~A>" active pending)))
+    (with-slots (active pending guards) self
+        (format out "PLAY-COM<~A /~%~A/~%~A>" active pending guards)))
 
-(defun mk-play-com (trump routes a c)
+       
+(defun mk-play-com (trump routes guards a c)
     (destructuring-bind (empty active pending)
                         (divlist (list (lambda (route) (not (tricks route)))
                                        (lambda (route)
@@ -1744,7 +1793,9 @@
                                                        (hand-suit c to-suit-void)))))))
                                  routes)
         (declare(ignore empty))
-        (make-instance 'play-com :trump trump :active active :pending pending)))
+        (make-instance 'play-com :zero-id (handid a) :trump trump 
+                                 :active active :pending pending
+                                 :guards guards)))
                                                               
 (defmethod mk-route ((com play-com) a b c d)
     (flet ((player-routes (player)
@@ -1769,7 +1820,7 @@
                   (list (player-routes 0)
                         (player-routes 2))))))
                                                    
-(defun play-routes (trump a b c d)
+(defun play-routes (trump a b c d &key (suits '(c d h s)))
     (labels ((suit-tops (suit &rest hands)
                 (or (apply #'best-outcome (mapcar (lambda* (top hands)
                                                   (do-next (apply #'simple-trick
@@ -1777,6 +1828,18 @@
                                                            (curry #'suit-tops suit)))
                                                 (list-prod '(T nil) (list hands (roll 2 hands)))))
                     (make-instance 'outcome :remaining hands)))
+             (guards (suit &rest hands)
+                (let* ((top-cards (sort (loop for hand in (mapcar (curry* #'hand-suit (hand) (hand suit))
+                                                                  hands)
+                                              for handid from 0
+                                              append (mapcar (f* #'list (curry #'cons handid))
+                                                             hand))
+                                        (lambda (a b) (> (second a) (second b)))))
+                       (last-guard (position-if (f* #'car (curry* #'mod (x) (x 2)) (curry #'= 1))
+                                                top-cards)))
+                  (cond ((not last-guard) (mapcar #'second top-cards))
+                        ((= last-guard 0) nil)
+                        (t (mapcar (curry #'second) (subseq top-cards 0 last-guard))))))
              (trick-type (&key left winnerno my? partners?)
                 (let ((conds `(,@(if left '((not (eq (seektree '(0 0) cards)
                                                      (seektree '(2 0) cards)))))
@@ -1792,7 +1855,7 @@
                              ,@(if (> (length conds) 1) `((and ,@conds)) conds)))))
              (void-vertices (from to tricks)
                 (filter (curry #'tricks)
-                        (loop for suit in '(c d h s)
+                        (loop for suit in suits
                               for suit-tricks in (divlist (mapcar (lambda (s) 
                                                                      (f* #'car #'car (curry #'eq s)))
                                                                   '(0 1 2))
@@ -1800,24 +1863,27 @@
                               collect (make-instance 'play-route :from from :to to
                                                                  :to-suit-void suit
                                                                  :tricks suit-tricks)))))
-      (destructuring-bind (my-left partner-left 
+      (destructuring-bind (guards my-left partner-left 
                            my-trumped partner-trumped 
                            my-lead partner-lead 
                            my partner)
-            (divlist (list (trick-type :left T :winnerno 0 :my? T)
+            (divlist (list (trick-type :winnerno 1)
+                           (trick-type :left T :winnerno 0 :my? T)
                            (trick-type :left T :winnerno 0 :partners? T)
                            (trick-type :left T :winnerno 2 :partners? T)
                            (trick-type :left T :winnerno 2 :my? T)
                            (trick-type :winnerno 2 :partners? T)
                            (trick-type :winnerno 2 :my? T)
                            (trick-type :my? T))
-                     (loop for suit in '(c d h s)
-                           append (let ((tops (suit-tops suit a b c d)))
-                                    (zip (tricks tops)
-                                         (winner-nos tops)
-                                         (loop for winner in (winners tops)
-                                               collect (find (second winner)
-                                                             (hand-suit a (first winner)))))))
+                     (loop for suit in suits
+                           append (let* ((tops (suit-tops suit a b c d))
+                                         (guards (apply #'guards (cons suit (roll 1 (remaining tops))))))
+                                    (append (zip (tricks tops)
+                                                 (winner-nos tops)
+                                                 (loop for winner in (winners tops)
+                                                       collect (find (second winner)
+                                                                     (hand-suit a (first winner)))))
+                                            (if guards `(((,(suitno suit) ,guards) 1))))))
                      :map #'car)
             (mk-play-com trump
                          (append (list (make-instance 'play-route :to 0 :tricks my)
@@ -1828,8 +1894,118 @@
                                  (void-vertices 0 2 my-trumped)
                                  (void-vertices 2 2 partner-left)
                                  (void-vertices 2 0 partner-trumped))
+                         guards
                          a c))))
                                                                                          
+(defun insert-route (route routes)
+    (let ((p (position-if (lambda (r) (and (eq (from r) (from route))
+                                           (eq (to r) (to route))
+                                           (eq (to-suit-void r) (to-suit-void r))))
+                          routes)))
+      (if p (append (subseq routes 0 p)
+                    (list (add-at (nth p routes) (tricks route)))
+                    (subseq routes (+ p 1)))
+            (cons route routes))))
+
+(defun append-routes (a &rest other)
+    (fold (lambda (acc val) (insert-route val acc))
+          a
+          (apply #'append other)))
+
+(defmethod first-pass ((self play-com) trick)
+    (fold (lambda (acc route)
+             (destructuring-bind (routes remaining) acc
+                (if remaining (destructuring-bind (remove break absent)
+                                                  (rem-break-div route (trump self) remaining)
+                                 (let* ((ids (mapcar #'second (append remove break)))
+                                        (updated (if ids (del-at route ids) route))
+                                        (break-ids (list- (mapcar #'second break)
+                                                          (mapcar #'second remove)
+                                                          :test #'equal))
+                                        (other (if break-ids
+                                                   (insert-route (make-instance 'play-route 
+                                                                        :from (to route)
+                                                                        :to (to route)
+                                                                        :tricks (reorder (tricks route)
+                                                                                         break-ids))
+                                                                       routes)
+                                                   routes)))
+                                    (list (if (tricks updated) (cons updated other) other)
+                                          (mapcar #'first absent))))
+                              (list (cons route routes) nil))))
+          (list nil trick)
+          (active self)))
+
+(defmethod second-pass ((self play-com) hands)
+    (divlist (list (lambda (route) 
+                     (with-slots (to to-suit-void) route
+                        (not (nth (suitno to-suit-void) (suits (nth to hands)))))))
+             (pending self)))
+
+(defmethod broken-guards ((self play-com) tricks)
+    (with-slots (guards) self
+        (destructuring-bind (remaining broken) 
+                (fold (lambda (acc val)
+                        (destructuring-bind (remaining broken) acc
+                            (destructuring-bind (suit ranks) val
+                                (let* ((played-ranks (mapcar #'second
+                                                             (filter (f* #'first (curry #'eq suit))
+                                                                     tricks)))
+                                       (new-ranks (list- ranks played-ranks)))
+                                    (if new-ranks
+                                        (list (cons (list suit new-ranks) remaining) broken)
+                                        (list remaining (cons suit broken)))))))
+                       
+                '(nil nil)
+                guards)
+            (setf guards remaining)
+            broken)))
+
+(defmethod normalized-hands ((self play-com) outcome)
+    (let ((offset (position-if (f* #'handid (curry #'eq (zero-id self)))
+                               (remaining outcome))))
+       (roll offset (remaining outcome))))
+
+(defmethod normalize-hands ((self play-com) outcome)
+    (flet ((norm-routes (offset routes)
+             (loop for route in routes
+                   collect (with-slots (from to to-suit-void tricks) route
+                                (make-instance 'play-route :from (if from (mod (+ from offset) 4))
+                                                           :to (mod (+ to offset) 4)
+                                                           :to-suit-void to-suit-void
+                                                           :tricks tricks)))))
+        (with-slots (active pending zero-id) self
+            (let ((offset (position-if (f* #'handid (curry #'eq (zero-id self)))
+                                       (remaining outcome))))
+                (if (> offset 0)
+                    (make-instance 'play-com :zero-id (handid (first (remaining outcome)))
+                                             :trump (trump self)
+                                             :active (norm-routes offset active)
+                                             :pending (norm-routes offset pending))
+                    self)))))
+
+(defmethod refresh-suits ((self play-com) suits hands)
+    (if suits (apply #'play-routes `(,(trump self) ,@hands :suits ,suits))))
+    
+(defmethod after-tricks ((self play-com) outcome)
+    (let ((new-self (normalize-hands self outcome))
+          (raw-cards (apply #'append (tricks outcome))))
+        (destructuring-bind (base-routes skipped-cards)
+                            (first-pass new-self raw-cards)
+            (destructuring-bind (new-active new-pending) 
+                                (second-pass new-self (remaining outcome))
+                 (let ((refreshed (refresh-suits new-self (broken-guards new-self skipped-cards) 
+                                                 (remaining outcome))))
+                   (make-instance 'play-com :zero-id (zero-id new-self)
+                                  :trump (trump self)
+                                  :active (append-routes (reverse base-routes) 
+                                                         new-active 
+                                                         (if refreshed (active refreshed)))
+                                  :pending (append-routes new-pending 
+                                                          (pending new-self)
+                                                          (if refreshed (pending refreshed)))
+                                  :guards (append (guards new-self) (if refreshed (guards refreshed)))))))))
+
 (test (let ((a (make-instance 'hand := '((0 5 10 11 12) () (0 1 4 9 10) (0 1 6))))
             (b (make-instance 'hand := '((2 3 9) (0 6 9 11) (6) (3 7 9 10 11))))
             (c (make-instance 'hand := '((1 6 7) (3 5 8 12) (3 5 7 12) (8 12))))
@@ -1840,6 +2016,37 @@
         ((1 5) (1 7) (2 1) (1 9)) ((3 1) (3 3) (3 12) (3 4))
         ((1 3) (1 4) (2 4) (1 11)) ((0 11) (0 2) (0 6) (0 4))
         ((0 12) (0 3) (0 1) (0 8)))
+      equal)
+
+(test (let* ((a (make-instance 'hand := '((0 5 10 11 12) () (0 1 4 9 10) (0 1 6))))
+             (b (make-instance 'hand := '((2 3 9) (0 6 9 11) (6) (3 7 9 10 11))))
+             (c (make-instance 'hand := '((1 6 7) (3 5 8 12) (3 5 7 12) (8 12))))
+             (d (make-instance 'hand := '((4 8) (1 2 4 7 10) (2 8 11) (2 4 5))))
+             (routes (play-routes 'h a b c d))
+             (trick (do-next (simple-trick 'h 's a b c d) 
+                             (curry #'simple-trick 'h 's))))
+          (tricks (apply #'mk-route (cons (after-tricks routes trick) (remaining trick)))))
+      '(((1 12) (1 1) (3 6) (1 0)) ((1 8) (1 10) (2 0) (1 6))
+        ((2 10) (2 6) (2 12) (2 2)) ((1 5) (1 7) (2 1) (1 9))
+        ((0 11) (0 2) (0 6) (0 4)) ((0 12) (0 3) (0 1) (0 8)))
+      equal)
+
+;; TODO:
+;;> (APPLY #'MK-ROUTE (CONS (PEEK (AFTER-TRICKS ROUTES TRICK)) (REMAINING TRICK)))
+;;  = OUTCOME<((♦2 ♥2 ♦6 ♠2) (♦4 ♠3 ♦J ♥5)) => (HAND<♣ J54 ♦  ♥ 8 ♠ KQJ95>
+;;                                              HAND<♣ Q983 ♦  ♥ A97 ♠ A10>
+;;                                              HAND<♣ 106 ♦ 9 ♥ K104 ♠ 764>
+;;                                              HAND<♣ AK72 ♦  ♥ QJ63 ♠ 8>) / (2
+;; One missing trick in this test…
+(test (let* ((a (make-instance 'hand := '((0 5 11 12) (3 5) (1 4 9 10) (0 1 6))))
+             (b (make-instance 'hand := '((2 3 9) (0 6 9 11) (6) (3 7 9 10 11))))
+             (c (make-instance 'hand := '((1 6 7 10) (8 12) (0 3 5 7 12) (8 12))))
+             (d (make-instance 'hand := '((4 8) (1 2 4 7 10) (2 8 11) (2 4 5))))
+             (routes (play-routes nil b c d a))
+             (trick (do-next (simple-trick nil 'd a b c d) 
+                             (curry #'simple-trick nil 'd))))
+          (tricks (apply #'mk-route (cons (after-tricks routes trick) (remaining trick)))))
+      '(((1 0) (2 0) (1 4) (3 0)) ((1 2) (3 1) (1 9) (2 3)))
       equal)
 
 (defun immediate-tricks (cache trump a b c d &key (suits '(c d h s)))
@@ -1955,16 +2162,28 @@
 (defclass play-strategy ()
    ((soonest :reader soonest)
     (establish :reader establish)
-    (trump :reader trump)))
+    (trump :reader trump)
+    (routes :reader routes)))
 
-(defmethod initialize-instance ((self play-strategy) &key trump hands)
-    (with-slots (soonest establish) self
-        (let ((targets (apply #'find-opp-weakness (cons trump hands))))
+(defmethod initialize-instance ((self play-strategy) &key trump hands soonest establish routes)
+    (if (not hands)
+        (progn (setf (slot-value self 'soonest) soonest)
+               (setf (slot-value self 'establish) establish)
+               (setf (slot-value self 'trump) trump)
+               (setf (slot-value self 'routes) routes))
+        (with-slots (soonest establish routes) self
+          (let ((targets (apply #'find-opp-weakness (cons trump hands))))
             (setf (slot-value self 'trump) trump)
             (setf soonest (mapcar #'first (filter (andf (f* #'second (curry #'= 0))
                                                         (lambda (x) (not (third x))))
                                                   targets)))
-            (setf establish (filter (f* #'second (curry #'< 0)) targets)))))
+            (setf establish (filter (f* #'second (curry #'< 0)) targets))
+            (setf routes (apply #'play-routes (cons trump hands)))))))
+
+(defmethod after-tricks ((self play-strategy) outcome)
+    (with-slots (soonest establish trump routes) self
+        (make-instance 'play-strategy :soonest soonest :establish establish
+                                      :trump trump :routes (after-tricks routes outcome))))
 
 (defmethod play-strategy ((strategy play-strategy) cache a b c d)
     (with-slots (soonest establish trump) strategy
@@ -2035,26 +2254,32 @@
     (let* ((cache (make-instance 'cache :! #'immediate-tricks))
            (defence (make-instance 'play-strategy :trump trump :hands (list left dummy right declarer)))
            (attack (make-instance 'play-strategy :trump trump :hands (list declarer left dummy right))))
-       (labels ((play-step (strategy opp-strategy a b c d)
+       (labels ((do-action (action a b c d s1 s2)
+                    (let ((ans (apply action (list a b c d))))
+                        (if (tricks ans)
+                            (let ((new-s1 (after-tricks s1 ans))
+                                  (new-s2 (after-tricks s2 ans)))
+                               (do-next ans (curry #'play-step new-s1 new-s2)
+                                            (curry #'play-step new-s2 new-s1))))))
+           
+                (play-step (strategy opp-strategy a b c d)
                     (let ((any-suit (position-if #'id (suits a)))
                           (peek-cond (and peek-nodes (funcall peek-nodes a b c d))))
                         (if any-suit
                             (let ((options (loop for action in (list (curry #'play-strategy strategy cache)
-                                                                     (curry #'mk-route
-                                                                            (play-routes trump a b c d))
+                                                                     (curry #'mk-route (routes strategy))
                                                                      (curry #'simple-trick trump any-suit))
                                                  collect (peek-if peek-cond
-                                                                  (do-next (apply action (list a b c d))
-                                                                           (curry #'play-step strategy opp-strategy)
-                                                                           (curry #'play-step opp-strategy strategy))))))
+                                                                  (do-action action a b c d strategy
+                                                                             opp-strategy)))))
                                (peek-if peek-cond (apply #'best-outcome options)))
                             (make-instance 'outcome :remaining (list a b c d))))))
           (play-step defence attack left dummy right declarer))))
 
-(test (tricks (play-deal nil  (make-instance 'hand := '((5 10 11 12) (8) (0 1 4 9 10) (0 1 6)))
+(test (tricks (peek (play-deal nil  (make-instance 'hand := '((5 10 11 12) (8) (0 1 4 9 10) (0 1 6)))
                               (make-instance 'hand := '((2 3 9) (0 6 9 11) (6) (3 7 9 10 11)))
                               (make-instance 'hand := '((0 1 6 7) (3 5 12) (3 5 7 12) (8 12)))
-                              (make-instance 'hand := '((4 8) (1 2 4 7 10) (2 8 11) (2 4 5)))))
+                              (make-instance 'hand := '((4 8) (1 2 4 7 10) (2 8 11) (2 4 5))))))
       '(((1 0) (1 12) (1 1) (1 8)) ((0 0) (0 4) (0 10) (0 2))
         ((0 12) (0 3) (0 1) (0 8)) ((0 11) (0 9) (0 6) (3 2))
         ((0 5) (2 6) (0 7) (3 4)) ((1 3) (1 4) (3 0) (1 6))
@@ -2128,7 +2353,7 @@
 
 (defmethod select ((self mc-case) &key fields filter)
     (with-slots (data props) self
-        (let ((source (if filter (filter filter data)
+        (let ((source (if filter (choose self filter)
                         data)))
             (if fields (let ((col-ids (mapcar (lambda (sym)
                                                  (position sym (cons 'hand props))) 
@@ -2179,7 +2404,7 @@
 
 (defparameter sim (load-mc-case "sim.dat"
                                 :sim-count 1000
-                                :fallback-params '(:= (partner-clubs untrump-balance best-tricks)
+                                :fallback-params '(:= (partner-clubs best-tricks)
                                                    :! (reorder (gen-partner-deal
                                                                      '((9 8 3 2) (A 7 5) (A 9 7 5) (A 10))
                                                                      12 '(H :hcp 3 :hcp-test >= :len 5))
@@ -2191,7 +2416,7 @@
     (apply #'+ (mapcar #'rank-hcp (flatten (append (first hands) (third hands))))))
 
 (defparameter simhcp (load-mc-case "simhcp.dat"
-                                   :sim-count 1000
+                                   :sim-count 100
                                    :fallback-params '(:! (deal-all 13 (all-cards))
                                                       := (line-hcp best-tricks))))
 

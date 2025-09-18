@@ -4,21 +4,26 @@
 ;; Show deals from given simulation, with expected tricks = 12
 (show-deals sim '(= best-tricks 10))
 
-;; TODO: fix case
+;; TODO: fix case (dumb 10 of spades taking trick :)
 (simdeal '(((5 10 11 12) (8) (0 1 4 9 10) (0 1 6))
      ((2 3 9) (0 6 9 11) (6) (3 7 9 10 11))
      ((0 1 6 7) (3 5 12) (3 5 7 12) (8 12))
      ((4 8) (1 2 4 7 10) (2 8 11) (2 4 5))))
 
-;; TODO: fix this case
 (simdeal '(((5 12) (0 7 9) (1 4 6 8 11) (5 9 11))
      ((4 8 10) (4 8) (0 2 10) (0 3 4 7 10))
      ((0 1 6 7) (3 5 12) (3 5 7 12) (8 12))
      ((2 3 9 11) (1 2 6 10 11) (9) (1 2 6))) :trump 'h)
 
+(defun len* (suit-ls)
+    (let ((end (car (last suit-ls))))
+        (cond ((not end) 0)
+              ((numberp end) (+ (length suit-ls) end -1))
+              (t (length suit-ls)))))
+
 ;;Print histograms for given fields of particular deal
 (print-hist (histogram (mapcar #'flatten (select sim :fields '(untrump-balance) ))))
-(print-hist (histogram (mapcar #'flatten (select sim :fields '(best-tricks) ))))
+(print-hist (histogram (select sim :fields '(partner-clubs) :filter '(= (len* partner-clubs) 2))))
 (print-hist (histogram (mapcar #'flatten (select sim :fields '(partner-clubs) ))))
 
 ;; Perform simulation for given deal
@@ -48,8 +53,7 @@
         do (hist-plot (nthcdr 2 (nth i h)) :cmd "lines" :out T
                       :params (format nil "pch=~a" i))))
 
-;; That takes too long if there are too many immediate tricks
-(peek (cons 'h (mapcar (f* #'hand #'mkhand) '(((H 11) (H 2) (H 0) (H 4) (H 8) (C 12) (C 11) (C 10) (C 5) (S 0) (C 2)
+(simdeal (peek (mapcar #'hand '(((H 11) (H 2) (H 0) (H 4) (H 8) (C 12) (C 11) (C 10) (C 5) (S 0) (C 2)
       (S 5) (C 8))
      ((H 9) (D 6) (C 4) (H 6) (D 9) (S 2) (C 3) (H 1) (D 4) (D 8) (C 9) (S 1)
       (H 10))
@@ -96,7 +100,7 @@
                           for avg in avgs
                           collect (float (/ avg hcp)))))
 
-(show-deals simhcp '(= line-hcp 25))
+(show-deals simhcp '(> best-tricks 10))
 
 (simdeal '(((1 2 3 7 12) (0 8 12) (0 10) (3 4 11))
      ((4 8 11) (5 6 11) (2 3 4 9 11) (1 9))
