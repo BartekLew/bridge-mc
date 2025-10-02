@@ -23,9 +23,10 @@
 
 ;;Print histograms for given fields of particular deal
 (print-hist (histogram (mapcar #'flatten (select sim :fields '(untrump-balance) ))))
-(print-hist (histogram (select sim :fields '(partner-clubs) :filter '(= (len* partner-clubs) 2))))
-(print-hist (histogram (mapcar #'flatten (select sim :fields '(partner-clubs) ))))
+(print-hist (histogram (select sim :fields '(partner-clubs) :filter '(= (len* partner-clubs) 4))))
+(print-hist (histogram (mapcar #'flatten (select sim :fields '(best-tricks) ))))
 
+(print-hist (histogram (select sim :fields '(best-tricks))))
 ;; Perform simulation for given deal
 (simdeal '(((11) (0 4 8 11) (0 1 2 8 11) (4 7 11))
      ((2 3 5 8 12) (2 7 10) (4 10) (1 3 5))
@@ -100,9 +101,59 @@
                           for avg in avgs
                           collect (float (/ avg hcp)))))
 
-(show-deals simhcp '(> best-tricks 10))
+(show-deals sim '(= best-tricks 6))
+(histogram (select sim :fields '(best-tricks)))
 
-(simdeal '(((1 2 3 7 12) (0 8 12) (0 10) (3 4 11))
-     ((4 8 11) (5 6 11) (2 3 4 9 11) (1 9))
-     ((0 5) (3 4 10) (6 8 12) (0 5 6 10 12))
-     ((6 9 10) (1 2 7 9) (1 5 7) (2 7 8))))
+(simdeal '(((2 4 11) (1 11) (0 4 6 8 11) (3 4 11))
+     ((3 5 9 10) (0 7 8 10) (10) (0 1 2 10))
+     ((0 1 6 7) (3 5 12) (3 5 7 12) (8 12))
+     ((8 12) (2 4 6 9) (1 2 9) (5 6 7 9))) :trump 'h)
+ 
+(simdeal '(((0 7 9) (0 2 10 11) (0 4) (3 4 7 12))
+           ((1 2) (1 12) (1 3 5 7 8 11) (0 8 10))
+           ((3 6 11 12) (4 5 8) (2) (2 5 6 9 11))) :trump 'd)
+
+(loop for min from 0 to 20 by 3
+      collect (let ((max (+ 3 min)))
+                (let* ((dg (make-instance 'distgen :hcp (list min max))))
+                    (peek (list min max (apply #'+ (loop for x = (next dg)
+                                                   while x
+                                                   collect (first x))))))))
+
+(defparameter sim2
+    (let ((dg (make-instance 'deal 
+                             :~ '((:hcp (20 21) :c (2 4) :d (2 4) :h (2 4) :s (2 4)))
+                             := '(((4 3 2) (10 4 3) (K 10 9 5 4) (8 7))))))
+       (make-instance 'mc-case :! `(reorder (build ,dg) '(1 2 0 3))
+                               := '(best-tricks)
+                               :trump nil)))
+
+(measure-time
+(let ((dg (measure-time (make-instance 'distgen))))
+    (let ((data (loop for x from 0 to 1000
+                    collect (let-from! (peek (rand-hand dg (all-cards)))
+                                       (rest hand)
+                              (list (apply #'+ (mapcar #'rank-hcp
+                                                       (apply #'append (suits hand))))
+                                    (sort (mapcar #'length (suits hand))
+                                          #'>))))))
+        (print-hist (histogram (mapcar #'first data)))
+        (print-hist (histogram (mapcar #'second data))))))
+
+(measure-time
+(let ((dg (make-instance 'deal :~ '((:hcp (20 21) :c (2 4) :d (2 4) :h (2 4) :s (2 4)))
+                               := '(((4 3 2) (10 4 3) (K 10 9 5 4) (8 7))))))
+   (print-hist (histogram (loop for i from 0 to 1000 
+                                collect (let ((d (mapcar #'suits (peek (build dg)))))
+                                            (peek (list (length (seektree '(1 2) d))
+                                                        (apply #'best-tricks (cons 'h (reorder d '(1 2 0 3))))))))))))
+                                                                
+(measure-time
+(let ((dg (make-instance 'deal :~ '((:hcp (6 10) :d (7 nil (5 nil)))
+                                    (:hcp (15 nil) :s (6 nil)))
+                               := '(((K 8 4 3) (K 5 4) (K 10 5 4) (J 3))))))
+   (print-hist (histogram (loop for i from 0 to 1000
+                                collect (let ((d (mapcar #'suits (peek (build dg)))))
+                                            (peek (list (apply #'best-tricks (cons 'S (reorder d '(2 0 3 1))))
+                                                        (apply #'best-tricks (cons 'D (reorder d '(1 2 0 3))))))))))))
+
