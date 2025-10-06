@@ -1,4 +1,4 @@
-; Copyright (C) 2025  Bartosz "Lew" Pastudzki
+; Copyright (C) 2025  Bartosz "Lew" Pastudzki <lew@wiedz.net.pl>
  
 ; This program is free software: you can redistribute it and/or modify
 ; it under the terms of the GNU Affero General Public License as published
@@ -50,6 +50,23 @@
                         (format t "TEST ~A failed:~%  ~A~%  not equal to:~%  ~A~%"
                                   ,file val ref)))))
            ,@body)))
+
+(defun splitstr (sep str &optional max-len acc)
+    (if (and max-len (= max-len 0))
+        (reverse (cons str acc))
+        (let ((pos (search sep str)))
+            (if pos (splitstr sep (subseq str (+ pos (length sep)))
+                                  (if max-len (- max-len 1))
+                                  (cons (subseq str 0 pos) acc))
+                    (reverse (cons str acc))))))
+    
+(test (splitstr " : " "foo : bar : baz")
+      '("foo" "bar" "baz")
+      equal)
+    
+(test (splitstr ":" "foo : bar : baz" 1)
+      '("foo " " bar : baz")
+      equal)
 
 (defmacro let-from (lst names &body body)
     (let ((len (length names)))
@@ -1473,6 +1490,49 @@
                                            =)))
 (defun mkhand (x &optional id) (make-instance 'hand := x :id id))
 
+(defun str2hand (str)
+    (labels ((str2ranks (str &optional acc)
+                (if (= (length str) 0)
+                    acc
+                    (let ((h (char str 0)))
+                      (cond ((eq h #\1) (str2ranks (subseq str 2) (cons 8 acc)))
+                            ((eq h #\space) acc)
+                            ((str2ranks (subseq str 1)
+                                        (cons (position h '(#\2 #\3 #\4 #\5 #\6 #\7 #\8 #\9 #\1 #\J #\Q #\K #\A)) acc))))))))
+      (let-from! (splitstr ": " str 1)
+                 (handid suits)
+        (let ((suitstrs (reorder (splitstr " " suits) '(1 3 5 7))))
+           (mkhand (loop for str in suitstrs
+                         collect (str2ranks str))
+                   handid)))))
+         
+(test (suits (str2hand "N: ♣ KJ96 ♦ A8 ♥ AJ83 ♠ AK9"))
+      '((4 7 9 11) (6 12) (1 6 9 12) (7 11 12))
+      equal)
+
+(test (handid (str2hand "N: ♣ KJ96 ♦ A8 ♥ AJ83 ♠ AK9"))
+      "N"
+      equal)
+
+(defun str2deal (str)
+    (loop for handstr in (splitstr (format nil "~%") str)
+          collect (str2hand handstr)))
+
+(test (mapcar #'suits (str2deal "N: ♣ KJ96 ♦ A8 ♥ AJ83 ♠ AK9
+E: ♣ Q5 ♦ J9762 ♥ Q ♠ J6543
+S: ♣ 432 ♦ 1043 ♥ K10954 ♠ 87
+W: ♣ A1087 ♦ KQ5 ♥ 762 ♠ Q102"))
+    '(((4 7 9 11) (6 12) (1 6 9 12) (7 11 12)) ((3 10) (0 4 5 7 9) (10) (1 2 3 4 9))
+      ((0 1 2) (1 2 8) (2 3 7 8 11) (5 6)) ((5 6 8 12) (3 10 11) (0 4 5) (0 8 10)))
+    equal)
+
+(test (mapcar #'handid (str2deal "N: ♣ KJ96 ♦ A8 ♥ AJ83 ♠ AK9
+E: ♣ Q5 ♦ J9762 ♥ Q ♠ J6543
+S: ♣ 432 ♦ 1043 ♥ K10954 ♠ 87
+W: ♣ A1087 ♦ KQ5 ♥ 762 ♠ Q102"))
+      '("N" "E" "S" "W")
+      equal)
+      
 (defmethod print-object ((self hand) out)
     (format out "HAND<~A>" (print-hand (suits self))))
 
@@ -2679,8 +2739,8 @@
       equal)
 
 (defun simdeal (deal &key trump)
-    (print-deal deal '(n e s w))
-    (let ((outcome (apply 'play-deal (cons trump (mapcar (curry #'make-instance 'hand :=) deal)))))
+    (print-deal (mapcar #'suits deal) (mapcar #'handid deal))
+    (let ((outcome (apply 'play-deal (cons trump deal))))
         (format t "winners: ~A~%" (car (score outcome)))
         (loop for trick in (tricks outcome)
               do (format t "~{~A ~}~%" (mapcar #'cardstr trick)))))
@@ -2703,6 +2763,11 @@
 (defun best-tricks (trump n e s w)
     (second (score (play-deal trump  (mkhand n) (mkhand e) (mkhand s) (mkhand w)))))
 
+(defun trump-length (trump n e s w)
+    (declare (ignore e w))
+    (apply #'+ (mapcar (f** (curry #'nth (suitno trump)) #'length)
+                       (list n s))))
+
 (defclass mc-case ()
     ((props :initarg :=)
      (dealgen :initarg :!)
@@ -2716,7 +2781,7 @@
 (defmethod sim ((self mc-case) runs)
     (with-slots (props dealgen trump data) self
         (loop for i from 0 to runs
-              do (let ((deal (peek (mapcar #'suits (eval dealgen)))))
+              do (let ((deal (mapcar #'suits (eval dealgen))))
                     (setf data (cons (cons  deal
                                             (mapcar (lambda (prop)
                                                        (apply prop (cons trump deal)))
@@ -2735,7 +2800,7 @@
 (defmethod choose ((self mc-case) exp)
     (with-slots (props data) self
         (let ((pred (sublis (loop for i from 0
-                                     for sym in (cons 'hand props)
+                                     for sym in (cons 'hands props)
                                      collect `(,sym . (nth ,i row)))
                         exp)))
             (filter (eval `(lambda (row) ,pred)) data))))
@@ -2745,7 +2810,7 @@
         (let ((source (if filter (choose self filter)
                         data)))
             (if fields (let ((col-ids (mapcar (lambda (sym)
-                                                 (position sym (cons 'hand props))) 
+                                                 (position sym (cons 'hands props))) 
                                               fields)))
                            (loop for row in source
                                  collect (loop for c in col-ids
@@ -2754,7 +2819,7 @@
 
 (defmethod show-deals ((self mc-case) filter)
     (loop for deal in (choose self filter)
-      do (print-deal (peek (car deal)))))
+      do (print-deal (car deal))))
 
 (defmethod save ((self mc-case) filename)
     (with-open-file (out filename
@@ -2763,19 +2828,16 @@
                         :if-does-not-exist :create)
         (with-slots (props dealgen trump data) self
             (let ((*print-pretty* nil))
-                (prin1 (list props dealgen trump) out)
                 (loop for row in data
                       do (prin1 row out))))))
 
 (defun load-mc-case (filename &key fallback-params sim-count)
    (with-open-file (s filename :direction :input :if-does-not-exist nil)
       (if s
-        (let-from! (read s nil :eof)
-                   (props dealgen trump)
-           (let ((data (loop for row = (read s nil :eof)
+        (let ((data (loop for row = (read s nil :eof)
                              until (eq row :eof)
                              collect row)))
-              (make-instance 'mc-case :! dealgen := props :trump trump :data data)))
+              (apply #'make-instance `(mc-case ,@fallback-params :data ,data)))
         (if fallback-params
             (let ((obj (apply #'make-instance (cons 'mc-case fallback-params))))
                 (if sim-count (sim obj sim-count)
