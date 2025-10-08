@@ -2853,23 +2853,9 @@ W: ♣ A1087 ♦ KQ5 ♥ 762 ♠ Q102"))
                                           (self nil (cons (length hand) acc))))))))
         (self (reverse (seektree '(0 0) hands)))))
 
-(defparameter sim (load-mc-case "sim.dat"
-                                :sim-count 1000
-                                :fallback-params '(:= (partner-clubs best-tricks)
-                                                   :! (reorder (gen-partner-deal
-                                                                     '((9 8 3 2) (A 7 5) (A 9 7 5) (A 10))
-                                                                     12 '(H :hcp 3 :hcp-test >= :len 5))
-                                                                     '(1 2 0 3))
-                                                   :trump h)))
-
 (defun line-hcp (trump &rest hands)
     (declare (ignore trump))
     (apply #'+ (mapcar #'rank-hcp (flatten (append (first hands) (third hands))))))
-
-(defparameter simhcp (load-mc-case "simhcp.dat"
-                                   :sim-count 100
-                                   :fallback-params '(:! (deal-all 13 (all-cards))
-                                                      := (line-hcp best-tricks))))
 
 
 (defun hist-plot (histogram &key (cmd "plot") params (out T))
