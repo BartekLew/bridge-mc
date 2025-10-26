@@ -998,6 +998,8 @@
                                   for supply in breakdown
                                   collect (deal amount supply))))))
 
+(defun mkhand (x &optional id) (make-instance 'hand := x :id id))
+
 (defmethod rand-hand ((self distgen) cards)
     (let ((x (random (total-weight self))))
         (setf (slot-value self 'cur) nil)
@@ -1008,26 +1010,73 @@
         (list (first hand)
               (mkhand (hand (second hand))))))
 
+(defmacro fold-param-lists (initial defs params expression &key (default 'acc))
+    (if (> (length params) 1)
+        `(fold (lambda (acc val)
+                  (destructuring-bind (&key ,@params &allow-other-keys) val
+                     (loop for val in (list ,@params)
+                           for acc in acc
+                           collect (if (not val) ,default ,expression))))
+           ,initial
+           ,defs)
+        `(fold (lambda (acc val)
+                  (destructuring-bind (&key ,@params &allow-other-keys) val
+                      (if (not ,@params) acc
+                        ,expression)))
+           ,initial
+           ,defs)))
+
+(defun -? (a b)
+    (cond ((not a) b)
+          ((not b) a)
+          (t (- a b))))
+
+(defun hands-in-supply (supply)
+    (/ (apply #'+ (mapcar (curry #'apply #'+) supply)) 13))
+
+(define-condition bad-range (error)
+    ((down :initarg :down :reader down)
+     (up :initarg :up :reader up)
+     (msg :initarg :msg :reader msg)
+     (val :initarg :val :initform nil :reader val))
+    (:report (lambda (obj out)
+                (if (val obj)
+                    (format out "~A: val '~A' in <~A-~A>"
+                            (or (msg obj) "out of range")
+                                (val obj) (down obj)
+                                (up obj))
+                    (format out "~A: <~A-~A>"
+                            (or (msg obj) "out of range")
+                            (down obj)
+                            (up obj))))))
+                            
+
 (defun infer-hcp-range (supply base-params &rest other-defs)
     (let* ((total-hcp (permut-hcp (apply #'append (mapcar #'cdr supply))))
-           (max-hcp (fold (lambda (acc val)
-                            (destructuring-bind (&key hcp &allow-other-keys) val
-                                (cond ((not hcp) acc)
-                                      ((listp hcp) (if (first hcp) (- acc (first hcp))
-                                                                   acc))
-                                      (t (- acc hcp)))))
-                         total-hcp
-                         other-defs)))
+           (min-hcp (if (= (hands-in-supply supply) (+ (length other-defs) 1))
+                        (fold-param-lists total-hcp other-defs
+                           (hcp) (if (= acc 0) acc
+                                               (max (-? acc (if (listp hcp) (second hcp) hcp)) 0)))
+                        0))
+           (max-hcp (fold-param-lists total-hcp other-defs
+                        (hcp) (-? acc (if (listp hcp) (first hcp) hcp)))))
         (destructuring-bind (&key hcp &allow-other-keys) base-params
             (let ((up-limit (min max-hcp total-hcp)))
-                (cond ((not hcp) (if (< up-limit total-hcp) `(:hcp (nil ,up-limit))))
-                      ((listp hcp) (let-from* hcp (down up)
-                                      (if (> (or down 0) up-limit) 
-                                          (error 'error :msg "Can't infer correct limit!"))
-                                      `(:hcp (,(or down 0)
-                                              ,(if up (min up up-limit) up-limit)))))
-                      (t (if (> hcp up-limit)
-                             (error 'error :msg "Can't infer correct limit!"))
+                (cond ((not hcp) (if (or (< up-limit total-hcp)
+                                         (> min-hcp 0)) 
+                                     `(:hcp (,min-hcp ,up-limit))))
+                      ((listp hcp) (let ((down (max (or (first hcp) 0) min-hcp))
+                                         (up (if (second hcp) (min (second hcp) up-limit)
+                                                              up-limit)))
+                                      (if (> down up) 
+                                          (error 'bad-range :msg "Can't infer correct limit!"
+                                                            :down down :up up))
+                                      `(:hcp (,down
+                                              ,up))))
+                      (t (if (or (> hcp up-limit)
+                                 (< hcp min-hcp))
+                             (error 'bad-range :msg "Can't infer correct limit!"
+                                               :down min-hcp :up max-hcp :val hcp))
                          `(:hcp ,hcp)))))))
 
 (test (infer-hcp-range (supply (all-cards)) '(:hcp (11 15) :c (6 nil) :h (0 2))
@@ -1039,7 +1088,7 @@
 (test (infer-hcp-range '((5 1 1 1 1) (8 0 1 1 1) (7 1 1 0 0) (6 0 0 0 1))
                        '(:h (7 nil))
                        '(:hcp (10 17)))
-      '(:hcp (nil 16))
+      '(:hcp (0 16))
       equal)
 
 (test (infer-hcp-range '((5 1 1 1 1) (8 0 1 1 1) (7 1 1 0 0) (6 0 0 0 1))
@@ -1056,49 +1105,59 @@
 (test (infer-hcp-range '((9 1 1 1 1)) '(:hcp (4 6)) '(:hcp 6))
       '(:hcp (4 4))
       equal)
+
+(test (infer-hcp-range '((6 1 1 1 1) (9 0 0 1 0) (9 0 0 0 0) (6 1 1 1 1))
+                        '(:hcp (0 11)) '(:hcp (0 10)) '(:hcp (0 10)))
+      '(:hcp (3 11))
+      equal)
     
 (defun infer-suit-ranges (supply base-params &rest other-defs)
     (let* ((suitlen (mapcar (curry #'apply #'+) supply))
-           (max-len (fold (lambda (acc val)
-                            (destructuring-bind (&key c d h s &allow-other-keys) val
-                                (loop for suitdef in (list c d h s)
-                                      for suitacc in acc
-                                      collect (cond ((not suitdef) suitacc)
-                                                    ((listp suitdef) (if (first suitdef)
-                                                                         (- suitacc (first suitdef))
-                                                                         suitacc))
-                                                    (t (- suitacc suitdef))))))
-                         suitlen
-                         other-defs))
+           (min-len (if (= (hands-in-supply supply) (+ (length other-defs) 1))
+                        (fold-param-lists suitlen other-defs
+                            (c d h s) (if (= acc 0) acc
+                                                    (-? acc (if (listp val) (second val) val)))
+                            :default 0)
+                        (loop for _ in suitlen collect 0)))
+           (max-len (fold-param-lists suitlen other-defs
+                        (c d h s) (-? acc (if (listp val) (first val) val))))
            (suit-hcp-defs (loop for suit in '(:c :d :h :s)
                                 collect (mapcar (f* (curry* #'getf (def) (def suit))
+                                                    #'ensure-list
                                                     #'third
                                                     (curry #'list :hcp))
                                                 other-defs))))
         (destructuring-bind (&key c d h s &allow-other-keys) base-params
             (loop for slen in suitlen
                   for maxlen in max-len
+                  for minlen in min-len
                   for suit-hcp in suit-hcp-defs
                   for suit-supply in supply
                   for key in '(:c :d :h :s)
                   for def in (list c d h s)
                   append (let ((up-limit (min maxlen slen)))
-                              (cond ((not def) (if (< up-limit slen) `(,key (nil ,up-limit))))
-                                    ((listp def) (let-from* def (down up hcp)
-                                                    (if (> (or down 0) up-limit) 
-                                                        (error 'error :msg "Can't infer correct limit!"))
-                                                    `(,key (,(or down 0)
-                                                            ,(if up (min up up-limit) up-limit)
+                              (cond ((not def) (if (< up-limit slen) `(,key (,minlen ,up-limit))))
+                                    ((listp def) (let ((down (if (first def) (max (first def) minlen)
+                                                                             minlen))
+                                                       (up (if (second def) (min (second def) up-limit)
+                                                                            up-limit))
+                                                       (hcp (if (listp def) (third def))))
+                                                    (if (> down up-limit) 
+                                                        (error 'bad-range :msg "Can't infer correct limit!"
+                                                               :down down :up up))
+                                                    `(,key (,down ,up
                                                             ,@(cdr (apply #'infer-hcp-range
-                                                                          `((,suit-supply) (:hcp ,hcp) ,@suit-hcp)))))))
-                                    (t (if (> def up-limit)
-                                           (error 'error :msg "Can't infer correct limit!"))
-                                           `(,key ,def))))))))
+                                                                         `((,suit-supply) (:hcp ,hcp) ,@suit-hcp)))))))
+                                    (t (if (or (> def up-limit)
+                                               (< def minlen))
+                                           (error 'bad-range :msg "Can't infer correct limit!"
+                                                             :down minlen :up up-limit :val def)
+                                           `(,key ,def)))))))))
 
 (test (infer-suit-ranges (supply (all-cards)) '(:hcp (11 15) :c (6 nil) :h (0 2))
                                               '(:hcp (12 15) :c (3 5) :d (1 5))
                                               '(:hcp (15 17)))
-      '(:c (6 10) :d (nil 12) :h (0 2))
+      '(:c (6 10) :d (0 12) :h (0 2))
       equal)
 
 (test (infer-suit-ranges '((5 1 1 1 1) (8 0 1 1 1) (7 1 1 0 0) (6 0 0 0 1))
@@ -1117,6 +1176,13 @@
                          '(:hcp (8 nil) :h (7 nil (5 nil)))
                          '(:hcp (10 17) :h (1 5 (4 nil))))
       '(:h (7 8 (5 5)))
+      equal)
+
+(test (infer-suit-ranges (supply (all-cards)) '(:hcp (11 15) :h (0 2))
+                                              '(:hcp (12 15) :c (3 5) :d (1 5))
+                                              '(:hcp (15 17) :c 1)
+                                              '(:c 3))
+      '(:c (4 6) :d (0 12) :h (0 2))
       equal)
 
 (defun infer-distgen-params (supply base others)
@@ -1146,8 +1212,9 @@
                                                                                    (cdr defs))))
                                               rest)
                                    (rest* hand)
-                           (if (cdr defs) (self rest* (cdr defs) (append acc (list hand)))
-                                          (list rest* (append acc (list hand)))))))
+                           (if (and (cdr defs) (> (length rest*) 13))
+                               (self rest* (cdr defs) (append acc (list hand)))
+                               (list rest* (append acc (list hand)))))))
                 (let-from! (rand-hand rootgen cards) (rest hand)
                    (let-from! (self rest (cdr defs) (list hand))
                               (rest* hands)
@@ -1282,34 +1349,10 @@
           (lambda (hand)
              (sort (mapcar #'length (second (take trump hand))) #'<))))
 
-(defun suit-hcp (hand)
-    (apply #'+ (mapcar (lambda (lst) (apply #'+ (mapcar #'rank-hcp lst))) hand)))
-
-(defun suit-strength (hand)
-    (strength (suit-hcp hand)))
-
 (defun f-cons (&rest functions)
     (lambda (&rest input)
         (mapcar (lambda (f) (apply f input))
                 functions)))
-
-(defun mc-case (measures &key (volume 2500) first-hand deal)
-    (histogram
-        (apply #'append
-            (loop for i from 0 to volume
-                  collect (mapcar (apply #'f-cons measures)
-                                  (mapcar #'hand
-                                          (cond (first-hand (let-from! (eval first-hand) (rest)
-                                                                (deal-all 13 rest)))
-                                                (deal (eval deal))
-                                                (t (deal-all 13 (all-cards))))))))))
-
-(mc-case '(suit-strength suit-distribution) :first-hand '(gen-hand 18 'hcp))
-
-;(let ((f (gen-hand 14 'hcp)))
-;   (mapcar #'hand (cons (second f) (deal-all 13 (first f)))))
-
-(mc-case (fit-n-distrib 0) :first-hand '(gen-hand '(5 3 3 2) 'distribution))
 
 (defun gen-suit (cards suit &key (hcp-test #'=) hcp len)
     (if hcp (gen-hand hcp 'hcp :total len :test hcp-test 
@@ -1488,8 +1531,6 @@
     (setf (slot-value self 'id) (or id (format nil "~x" (random 255))))
     (setf (slot-value self 'suits) (mapcar (lambda (x) (sort x #'<))
                                            =)))
-(defun mkhand (x &optional id) (make-instance 'hand := x :id id))
-
 (defun str2hand (str)
     (labels ((str2ranks (str &optional acc)
                 (if (= (length str) 0)
@@ -2738,6 +2779,25 @@ W: ♣ A1087 ♦ KQ5 ♥ 762 ♠ Q102"))
         ((3 12) (2 8) (2 10) (3 11)))
       equal)
 
+(defun suit-hcp (suit)
+    (apply #'+ (mapcar #'rank-hcp suit)))
+
+; Test if infering minimum values work properly
+(let ((dg (make-instance 'deal :~ '((:hcp (0 11) :c (2 5) :d (2 5) :h (2 5) :s (2 5))
+                                    (:hcp (0 11) :c (2 5) :d (2 5) :h (2 5) :s (2 5))
+                                    (:hcp (0 11) :c (2 5) :d (2 5) :h (2 5) :s (2 5)))
+                               := '(((A J 7) (A K 5 4) (6 5 4 3) (6 4))))))
+    (test (filter (lambda (h)
+                    (let ((hcp (apply #'+ (mapcar #'suit-hcp (suits h))))
+                          (suitlens (mapcar #'length (suits h))))
+                        (or (> hcp 11) 
+                            (filter #'id (loop for len in suitlens
+                                               collect (or (< len 2) (> len 5)))))))
+                                                    
+                  (loop for i from 1 to 20
+                        append (cdr (build dg))))
+          nil eq))
+ 
 (defun simdeal (deal &key trump)
     (print-deal (mapcar #'suits deal) (mapcar #'handid deal))
     (let ((outcome (apply 'play-deal (cons trump deal))))
