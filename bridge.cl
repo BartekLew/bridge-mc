@@ -122,6 +122,23 @@
          (format t "TIME(~A) = ~A~%" ',body (- (get-universal-time) start-time))
          ans))
 
+(defvar *time-profs* (make-hash-table :test 'equal))
+(defmacro profile-time (body &optional name)
+    `(let* ((start-time (get-universal-time))
+            (ans ,body)
+            (duration (- (get-universal-time) start-time))
+            (so-far (gethash ',(or name body) *time-profs*)))
+        (setf (gethash ',(or name body) *time-profs*) (if so-far (+ so-far duration)
+                                                       duration))
+        ans))
+        
+(defun show-time-profs ()
+    (loop for key being the hash-keys of *time-profs*
+          collect (list key (gethash key *time-profs*))))
+
+(defun reset-time-profs ()
+    (setf *time-profs* (make-hash-table :test 'equal)))
+
 (defun filter (pred lst &optional acc)
     (if (not lst) (reverse acc)
         (letcar lst
@@ -443,6 +460,9 @@
 
 (defmacro += (var val)
     `(setf ,var (+ ,var ,val)))
+
+(defun mean (lst)
+    (/ (apply #'+ lst) (length lst)))
 
 ;; ===========================
 ;; Cards and printing them
@@ -1555,6 +1575,10 @@
       "N"
       equal)
 
+(defmethod pretty-tree ((this hand))
+    (loop for s in (suits this)
+          collect (mapcar (curry* #'nth (x) (x '(2 3 4 5 6 7 8 9 10 J Q K A)))
+                          (reverse s))))
 (defun str2deal (str)
     (loop for handstr in (splitstr (format nil "~%") str)
           collect (str2hand handstr)))
@@ -2823,6 +2847,37 @@ W: ♣ A1087 ♦ KQ5 ♥ 762 ♠ Q102"))
 (defun best-tricks (trump n e s w)
     (second (score (play-deal trump  (mkhand n) (mkhand e) (mkhand s) (mkhand w)))))
 
+(defun best-tricks* (_ n e s w)
+    (declare (ignore _))
+    (let ((trump (first  (fold (lambda (acc v) (if (or (not acc) (>= (second v) (second acc))) v acc))
+                               nil
+                            (loop for i from 0 to 3
+                                  for st in '(c d h s)
+                                  collect (list st (+ (length (nth i n)) (length (nth i s)))))))))
+        (let ((in-suit (second (score (play-deal trump  (mkhand n) (mkhand e) (mkhand s) (mkhand w)))))
+              (non-trump (second (score (play-deal nil  (mkhand n) (mkhand e) (mkhand s) (mkhand w))))))
+           (list trump in-suit non-trump))))
+
+(defun contract-score (suit tricks)
+    (if (> tricks 6)
+        (let ((base (cond ((not suit) (+ 40 (* (- (- tricks 6) 1) 30)))
+                          ((find suit '(c d)) (* (- tricks 6) 20))
+                          ((find suit '(h s)) (* (- tricks 6) 30)))))
+          (if (>= base 100) (+ base 300) base))
+        (* (- tricks 7) 50)))
+
+(defun best-outcomes (_ n e s w)
+    (declare (ignore _))
+    (let* ((outcomes (loop for roll from 0 to 1
+                           collect (let-from! (apply (curry #'best-tricks* nil) (roll roll (list  n e s w)))
+                                              (suit suit-tricks nt-tricks)
+                                      (let ((suit-score (contract-score suit suit-tricks))
+                                            (nt-score (contract-score nil nt-tricks)))
+                                      (if (> nt-score suit-score)
+                                          (list nil nt-tricks)
+                                          (list suit suit-tricks)))))))
+       (apply #'append outcomes)))
+                                    
 (defun trump-length (trump n e s w)
     (declare (ignore e w))
     (apply #'+ (mapcar (f** (curry #'nth (suitno trump)) #'length)
