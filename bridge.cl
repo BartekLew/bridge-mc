@@ -105,7 +105,7 @@
     
 (defmacro peek (body)
     `(let ((ans ,body))
-        (format T "> ~A~%  = ~A~%" ',body ans)
+        (format T "> ~S~%  = ~S~%" ',body ans)
         ans))
         
 (defmacro peek-if (test body)
@@ -1551,6 +1551,10 @@
     (setf (slot-value self 'id) (or id (format nil "~x" (random 255))))
     (setf (slot-value self 'suits) (mapcar (lambda (x) (sort x #'<))
                                            =)))
+
+(defun str2suitno (x)
+    (position x '("♣" "♦" "♥" "♠") :test #'equal))
+
 (defun str2hand (str)
     (labels ((str2ranks (str &optional acc)
                 (if (= (length str) 0)
@@ -1559,13 +1563,20 @@
                       (cond ((eq h #\1) (str2ranks (subseq str 2) (cons 8 acc)))
                             ((eq h #\space) acc)
                             ((str2ranks (subseq str 1)
-                                        (cons (position h '(#\2 #\3 #\4 #\5 #\6 #\7 #\8 #\9 #\1 #\J #\Q #\K #\A)) acc))))))))
+                                        (cons (position h '(#\2 #\3 #\4 #\5 #\6 #\7 #\8 #\9 #\1 #\J #\Q #\K #\A)) acc)))))))
+            (suits (fields &optional (acc '(nil nil nil nil)))
+                (cond ((not fields) acc)
+                      ((str2suitno (second fields)) 
+                            (setf (nth (str2suitno (first fields)) acc) nil)
+                            (suits (cdr fields) acc))
+                      (t (let ((suitno (str2suitno (car fields))))
+                            (setf (nth suitno acc) (str2ranks (second fields)))
+                            (suits (nthcdr 2 fields) acc)))))
+            (read-suits (suits &optional handid) 
+                (mkhand (suits (splitstr " " suits)) handid)))
       (let-from! (splitstr ": " str 1)
-                 (handid suits)
-        (let ((suitstrs (reorder (splitstr " " suits) '(1 3 5 7))))
-           (mkhand (loop for str in suitstrs
-                         collect (str2ranks str))
-                   handid)))))
+                 (a b)
+        (if b (read-suits b a) (read-suits a)))))
          
 (test (suits (str2hand "N: ♣ KJ96 ♦ A8 ♥ AJ83 ♠ AK9"))
       '((4 7 9 11) (6 12) (1 6 9 12) (7 11 12))
@@ -2984,3 +2995,13 @@ W: ♣ A1087 ♦ KQ5 ♥ 762 ♠ Q102"))
                     "")))))
       (rcode cmd histogram)))
 
+(defun best-suit (a b)
+    (let ((longest (fold (lambda (acc val)
+                            (if (>= (length (second val)) (length (second acc))) val acc))
+                         nil
+                         (loop for suit in '(c d h s)
+                               for as in a
+                               for bs in b
+                               collect (list suit (append as bs))))))
+       (car longest)))
+       
