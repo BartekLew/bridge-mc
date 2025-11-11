@@ -2701,12 +2701,18 @@ W: ♣ A1087 ♦ KQ5 ♥ 762 ♠ Q102"))
                                     (beat-or-low trick c)
                                     (beat-or-low trick d)))
                            ((position (second card) (hand-suit d suit))
-                                (make-trick suit trump
-                                    (beat-or-low trick a)
-                                    (beat-or-low trick b)
-                                    (beat-or-low trick c :use-highest T)
-                                    (beat-or-low trick d)))
-                           (t     (make-trick suit trump
+                                (if (beats? b c suit trump)
+                                    (make-trick suit trump
+                                        (beat-or-low trick a :use-highest T)
+                                        (beat-or-low trick b)
+                                        (beat-or-low trick c)
+                                        (beat-or-low trick d))
+                                    (make-trick suit trump
+                                        (beat-or-low trick a)
+                                        (beat-or-low trick b)
+                                        (beat-or-low trick c :use-highest T)
+                                        (beat-or-low trick d))))
+                           (t (make-trick suit trump
                                     (beat-or-low trick a)
                                     (beat-or-low trick b)
                                     (beat-or-low trick c)
@@ -2870,6 +2876,14 @@ W: ♣ A1087 ♦ KQ5 ♥ 762 ♠ Q102"))
         ((1 10) (2 4) (3 9) (2 7)) ((2 2) (2 9) (3 10) (2 12))
         ((3 12) (2 8) (2 10) (3 11)))
       equal)
+
+(let ((dp (make-instance 'deal-play :hands (list (str2hand "♣ AKQ7 ♦ 10 ♥ QJ632 ♠ 832")
+                                   (str2hand "♣ J54 ♦ KJ82 ♥ 8 ♠ KQJ95")
+                                   (str2hand "♣ 9832 ♦ A75 ♥ A975 ♠ A10")
+                                   (str2hand "♣ 106 ♦ Q9643 ♥ K104 ♠ 764")))))
+   (play-outcome (fold #'after-action
+         dp 
+         '(play-strategy play-strategy play-strategy play-strategy))))
 
 (defun suit-hcp (suit)
     (apply #'+ (mapcar #'rank-hcp suit)))
