@@ -2,6 +2,46 @@
 (ql:quickload '(:clack :clack-cors :jonathan :flexi-streams))
 (load "bridge.cl")
 
+(defclass table ()
+    ((users :initform '() :reader users)
+     (lock :initform nil)
+     (cond :initform nil)
+     (hands :initform '(nil nil nil nil))))
+
+(defvar *table* (make-instance 'table))
+
+(defmethod sitting-resp ((table table))
+    (with-slots (users) table
+        (if (= (length users) 4) `(:status ok
+                                   :ready ,users)
+                                 `(:status ok
+                                   :waiting ,users))))
+
+(defmethod sit ((table table) name)
+    (with-slots (users lock cond) table
+        (if (not lock) (setf lock (bt:make-lock)))
+        (if (not cond) (setf cond (bt:make-condition-variable)))
+
+        (let ((ans (or (find name users :test #'equal)
+                       (and (< (length users) 4)
+                            (setf users (cons name users))
+                            (or (when (= (length users) 4)
+                                      (setf users (second (deal 4 users)))
+                                      (bt:with-lock-held (lock)
+                                        (sb-thread:condition-broadcast cond)))
+                                 T)))))
+           (if ans (sitting-resp table) 
+                   '(:status rejected)))))
+
+(defmethod setting ((table table))
+    (with-slots (users lock cond) table
+        (if (not lock) (setf lock (bt:make-lock)))
+        (if (not cond) (setf cond (bt:make-condition-variable)))
+
+        (bt:with-lock-held (lock)
+            (if (not (= (length users) 4)) (bt:condition-wait cond lock :timeout 20))
+            (sitting-resp table))))
+
 (defun read-body (env)
   (let ((body (getf env :raw-body)))
     (etypecase body
@@ -61,7 +101,23 @@
                                       :score ,tricks
                                       :tricks ,(mapcar (curry #'mapcar #'cardstr) (tricks outcome))))
                                  results)))))))
-        
+
+(defun simple-endpoint (env fields function &key validator)
+    (let* ((request (peek (jonathan:parse (read-body env))))
+           (args (loop for field in fields
+                       collect (getf request field)))
+           (error (or (not validator) (apply validator args))))
+      (if error `(400 (:content-type "application/json")
+                      (,(jonathan:to-json `(:error ,error))))
+                `(200 (:content-type "application/json")
+                      (,(jonathan:to-json (apply function args)))))))
+       
+(defun string-validator (&key length)
+    (lambda (x)
+        (if (or (not (stringp x))
+                (and length (< (length x) 4)))
+           (format nil "Bad user name: ~S" x))))
+
 (defun app (env)
   "Simple API endpoint example."
   (let ((path (getf env :path-info)))
@@ -69,12 +125,17 @@
       ((eq (getf env :request-method) :OPTIONS)
        `(200 (:content-type "text/plain")
              ("")))
+      ((string= path "/api/sit")
+          (simple-endpoint env '(:|user|) (curry #'sit *table*)
+                           :validator (string-validator :length 4)))
+      ((string= path "/api/setting")
+       `(200 (:content-type "application/json")
+        (,(jonathan:to-json (setting *table*)))))
       ((string= path "/api/simdeal")
        `(200 (:content-type "application/json")
              (,(jonathan:to-json (sim-deal (jonathan:parse (read-body env)))))))
       (t
        `(404 (:content-type "text/plain") ("Not found"))))))
-
 
 (defun wrap-errors (app)
   (lambda (env)
@@ -121,8 +182,8 @@
 
 ;; Start server
 (defparameter *server*
-    (clack:clackup *wrapped-app* :server :woo :port 5000))
+    (clack:clackup *wrapped-app* :server :hunchentoot :port 5000 :max-connections 20))
 
 (defun restart-server ()
     (clack:stop *server*)
-    (setf *server* (clack:clackup *wrapped-app* :server :woo :port 5000)))
+    (setf *server* (clack:clackup *wrapped-app* :server :hunchentoot :port 5000 :max-connections 20)))
