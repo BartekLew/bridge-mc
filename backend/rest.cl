@@ -19,9 +19,11 @@
 
 (defclass table ()
     ((users :initform '() :reader users)
+     (mode :initform 'init)
      (lock :initform nil)
      (cond :initform nil)
-     (hands :initform '(nil nil nil nil))))
+     (hands :initform '(nil nil nil nil))
+     (auction :initform nil)))
 
 (defvar *table* (make-instance 'table))
 
@@ -56,6 +58,35 @@
         (bt:with-lock-held (lock)
             (if (not (= (length users) 4)) (bt:condition-wait cond lock :timeout 20))
             (sitting-resp table))))
+
+(defmethod for-uid ((table table) user function)
+    (with-slots (users) table
+        (let ((uid (position user users :test #'equal)))
+            (if uid (funcall function uid)
+                    `(:status error
+                      :message (format nil "User not logged in: ~a" user))))))
+
+(defmethod add-hand ((table table) user hand)
+    (with-slots (users hands) table
+        (if (= (length hand) 4)
+            (for-uid table user (lambda (uid)
+                                    (setf (nth uid hands) (str2hand hand))
+                                    (bt:with-lock-held (lock)
+                                       (sb-thread:condition-broadcast cond))
+                                    `(:status ok)))
+            `(:status error
+              :message "Bad state. Not all players are there."))))
+
+(defmethod auction ((table table) user since)
+    (with-slots (users auction lock cond) table
+       (bt:with-lock-held (lock)
+          (for-uid table user 
+                   (lambda (uid)
+                      (if (< since (length auction))
+                          (bt:condition-wait cond lock :timeout 20))
+                      (if (= (mod (length auction) 4) uid)
+                          `(:your-bid ,auction)
+                          `(:others-bid ,auction)))))))
 
 (defun read-body (env)
   (let ((body (getf env :raw-body)))
@@ -133,8 +164,9 @@
                 (and length (< (length x) 4)))
            (format nil "Bad user name: ~S" x))))
 
+(defvar *user-validator* (string-validator :length 4))
+
 (defun app (env)
-  "Simple API endpoint example."
   (let ((path (getf env :path-info)))
     (cond
       ((eq (getf env :request-method) :OPTIONS)
@@ -142,10 +174,20 @@
              ("")))
       ((string= path "/api/sit")
           (simple-endpoint env '(:|user|) (curry #'sit *table*)
-                           :validator (string-validator :length 4)))
+                           :validator *user-validator*))
       ((string= path "/api/setting")
        `(200 (:content-type "application/json")
         (,(jonathan:to-json (setting *table*)))))
+      ((string= path "/api/add-hand")
+          (simple-endpoint env '(:|user| :|hand|) (curry #'add-hand *table*)
+                               :validator (lambda (user hand)
+                                             (declare(ignore hand))
+                                             (apply *user-validator* user))))
+      ((string= path "/api/auction")
+          (simple-endpoint env '(:|user| :|since|) (curry #'auction 'table)
+                               :validator (lambda (user hand)
+                                             (declare(ignore hand))
+                                             (apply *user-validator* user))))
       ((string= path "/api/simdeal")
        `(200 (:content-type "application/json")
              (,(jonathan:to-json (sim-deal (jonathan:parse (read-body env)))))))
