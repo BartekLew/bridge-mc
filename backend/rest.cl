@@ -164,7 +164,10 @@
         (cond (success (if (functionp ok) (funcall ok val) val))
               (t (if (functionp error) (funcall error val) val)))))
 
-(defmethod combine ((this result) (other result) merger)
+(defmethod list-merger (a b)
+    (make-instance 'result :ok (append a (list b))))
+
+(defmethod combine ((this result) (other result) &optional (merger #'list-merger))
     (match this :ok (lambda (val)
                         (match other :ok (curry #'funcall merger val)
                                      :error other))
@@ -176,9 +179,7 @@
     (let* ((request (jonathan:parse (read-body env)))
            (raw-args (loop for field in fields
                            collect (getf request field)))
-           (args (if parse-args (fold (curry* #'combine (a b) 
-                                         (a b (lambda (a b)
-                                                 (make-instance 'result :ok (append a (list b))))))
+           (args (if parse-args (fold (curry #'combine)
                                       (make-instance 'result)
                                       (loop for i from 0 below (length raw-args)
                                             for base in raw-args
@@ -197,8 +198,13 @@
     (lambda (x)
         (if (or (not (stringp x))
                 (and length (< (length x) length)))
-           (make-instance 'result :error "Bad user name: ~S" x)
+           (make-instance 'result :error (format nil "Bad user name: ~S" x))
            (make-instance 'result :ok x))))
+
+(defun hand-parser (handstr)
+    (if (stringp handstr)
+        (make-instance 'result :ok (str2hand handstr))
+        (make-instance 'result :error (format nil "Wrong hand format: ~A" handstr))))
 
 (defvar *user-validator* (string-validator :length 4))
 
@@ -221,7 +227,9 @@
           (simple-endpoint env '(:|user| :|since|) (curry #'auction *table*)
                                :parse-args (list *user-validator*)))
       ((string= path "/api/simdeal")
-          (simple-endpoint env '(:|hands|) #'sim-deal))
+          (simple-endpoint env '(:|hands|) #'sim-deal
+                               :parse-args (list (f* (curry #'mapcar #'hand-parser)
+                                                     (curry #'fold #'combine (make-instance 'result))))))
       (t
        `(404 (:content-type "text/plain") ("Not found"))))))
 
