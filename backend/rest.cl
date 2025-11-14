@@ -41,12 +41,12 @@
 
         (let ((ans (or (find name users :test #'equal)
                        (and (< (length users) 4)
-                            (setf users (cons name users))
-                            (or (when (= (length users) 4)
-                                      (setf users (second (deal 4 users)))
-                                      (bt:with-lock-held (lock)
-                                        (sb-thread:condition-broadcast cond)))
-                                 T)))))
+                            (bt:with-lock-held (lock)
+                                (setf users (cons name users))
+                                (when (= (length users) 4)
+                                      (setf users (second (deal 4 users))))
+                                (sb-thread:condition-broadcast cond)))
+                                T)))
            (if ans (sitting-resp table) 
                    '(:status rejected)))))
 
@@ -67,12 +67,13 @@
                       :message (format nil "User not logged in: ~a" user))))))
 
 (defmethod add-hand ((table table) user hand)
-    (with-slots (users hands) table
-        (if (= (length hand) 4)
+    (with-slots (users hands cond lock) table
+        (if (= (length hands) 4)
             (for-uid table user (lambda (uid)
                                     (setf (nth uid hands) (str2hand hand))
-                                    (bt:with-lock-held (lock)
-                                       (sb-thread:condition-broadcast cond))
+                                    (if (not (position nil hands))
+                                        (bt:with-lock-held (lock)
+                                           (sb-thread:condition-broadcast cond)))
                                     `(:status ok)))
             `(:status error
               :message "Bad state. Not all players are there."))))
@@ -82,8 +83,9 @@
        (bt:with-lock-held (lock)
           (for-uid table user 
                    (lambda (uid)
-                      (if (< since (length auction))
-                          (bt:condition-wait cond lock :timeout 20))
+                      (if (and (<= since (length auction))
+                          (not (= (mod (length auction) 4) uid)))
+                        (bt:condition-wait cond lock :timeout 20))
                       (if (= (mod (length auction) 4) uid)
                           `(:your-bid ,auction)
                           `(:others-bid ,auction)))))))
@@ -148,21 +150,55 @@
                                       :tricks ,(mapcar (curry #'mapcar #'cardstr) (tricks outcome))))
                                  results)))))))
 
-(defun simple-endpoint (env fields function &key validator)
-    (let* ((request (peek (jonathan:parse (read-body env))))
-           (args (loop for field in fields
-                       collect (getf request field)))
-           (error (or (not validator) (apply validator args))))
-      (if error `(400 (:content-type "application/json")
-                      (,(jonathan:to-json `(:error ,error))))
-                `(200 (:content-type "application/json")
-                      (,(jonathan:to-json (apply function args)))))))
+(defclass result ()
+    ((success :reader ok?)
+     (val :reader val)))
+ 
+(defmethod initialize-instance ((this result) &key ok error)
+    (with-slots (success val) this
+        (setf success (if error nil T))
+        (setf val (or error ok))))
+
+(defmethod match ((this result) &key ok error)
+    (with-slots (success val) this
+        (cond (success (if (functionp ok) (funcall ok val) val))
+              (t (if (functionp error) (funcall error val) val)))))
+
+(defmethod combine ((this result) (other result) merger)
+    (match this :ok (lambda (val)
+                        (match other :ok (curry #'funcall merger val)
+                                     :error other))
+                :error (lambda (val)
+                          (match other :ok this
+                                       :error (curry #'format nil "~A~%~A" val)))))
+
+(defun simple-endpoint (env fields function &key parse-args)
+    (let* ((request (jonathan:parse (read-body env)))
+           (raw-args (loop for field in fields
+                           collect (getf request field)))
+           (args (if parse-args (fold (curry* #'combine (a b) 
+                                         (a b (lambda (a b)
+                                                 (make-instance 'result :ok (append a (list b))))))
+                                      (make-instance 'result)
+                                      (loop for i from 0 below (length raw-args)
+                                            for base in raw-args
+                                            collect (if (nth i parse-args)
+                                                        (funcall (nth i parse-args) base)
+                                                        (make-instance 'result :ok base))))
+                                (make-instance 'result :ok raw-args))))
+      (match args :error (lambda (error)
+                            `(400 (:content-type "application/json")
+                                  (,(jonathan:to-json `(:error ,error)))))
+                  :ok (lambda (args)
+                            `(200 (:content-type "application/json")
+                                  (,(jonathan:to-json (apply function args))))))))
        
 (defun string-validator (&key length)
     (lambda (x)
         (if (or (not (stringp x))
-                (and length (< (length x) 4)))
-           (format nil "Bad user name: ~S" x))))
+                (and length (< (length x) length)))
+           (make-instance 'result :error "Bad user name: ~S" x)
+           (make-instance 'result :ok x))))
 
 (defvar *user-validator* (string-validator :length 4))
 
@@ -174,23 +210,18 @@
              ("")))
       ((string= path "/api/sit")
           (simple-endpoint env '(:|user|) (curry #'sit *table*)
-                           :validator *user-validator*))
+                           :parse-args (list *user-validator*)))
       ((string= path "/api/setting")
        `(200 (:content-type "application/json")
         (,(jonathan:to-json (setting *table*)))))
       ((string= path "/api/add-hand")
           (simple-endpoint env '(:|user| :|hand|) (curry #'add-hand *table*)
-                               :validator (lambda (user hand)
-                                             (declare(ignore hand))
-                                             (apply *user-validator* user))))
+                               :parse-args (list *user-validator*)))
       ((string= path "/api/auction")
-          (simple-endpoint env '(:|user| :|since|) (curry #'auction 'table)
-                               :validator (lambda (user hand)
-                                             (declare(ignore hand))
-                                             (apply *user-validator* user))))
+          (simple-endpoint env '(:|user| :|since|) (curry #'auction *table*)
+                               :parse-args (list *user-validator*)))
       ((string= path "/api/simdeal")
-       `(200 (:content-type "application/json")
-             (,(jonathan:to-json (sim-deal (jonathan:parse (read-body env)))))))
+          (simple-endpoint env '(:|hands|) #'sim-deal))
       (t
        `(404 (:content-type "text/plain") ("Not found"))))))
 
@@ -232,7 +263,7 @@
 (defparameter *wrapped-app*
   (wrap-errors
     (clack-cors:make-cors-middleware
-        #'app
+        'app
         :allowed-origin "*"
         :allowed-methods "GET, POST, OPTIONS"
         :allowed-headers "Content-Type")))
