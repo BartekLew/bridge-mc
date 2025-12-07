@@ -13,8 +13,6 @@
 ; You should have received a copy of the GNU Affero General Public License
 ; along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-(load "~/quicklisp/setup.lisp")
-(ql:quickload '(:clack :clack-cors :jonathan :flexi-streams))
 (load "bridge.cl")
 
 (defclass table ()

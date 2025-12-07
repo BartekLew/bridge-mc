@@ -17,6 +17,9 @@
 ;; GENERAL UTILS
 ;; =============================
 
+(load "~/quicklisp/setup.lisp")
+(ql:quickload '(:bordeaux-threads))
+
 (defun id (x) x)
 
 (defun car* (x)
@@ -34,7 +37,7 @@
 (defmacro test (form result test)
   `(let ((ans ,form))
      (if (not (,test ans ,result))
-       (format t "TEST FAILED: ~A~%   != ~A~%" ans ,result))))
+       (format t "TEST FAILED [~A]:~%   ~A~%   !=    ~A~%" ',form ans ,result))))
 
 (defmacro mk-file-based-test (file &body body)
     `(with-open-file (out ,file :direction :output
@@ -93,6 +96,12 @@
 (defmacro lambda* (args &body body)
     `(lambda (arg)
         (let-from* arg ,args
+            ,@body)))
+
+(defmacro lambda-dot (args &body body)
+    `(lambda (args)
+        (let ((,(first args) (car args))
+              (,(second args) (cdr args)))
             ,@body)))
 
 (test (apply (lambda* (foo bar) (+ foo bar)) '((1 2 3 4)))
@@ -1564,6 +1573,7 @@
     ((suits :reader suits)
      (id :reader handid)))
 
+(defgeneric pretty-tree (x))
 (defmethod initialize-instance ((self hand) &key = remaining id)
     (setf (slot-value self 'id) (or id (format nil "~x" (random 255))))
     (setf (slot-value self 'suits) 
