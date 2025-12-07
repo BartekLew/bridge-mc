@@ -20,6 +20,8 @@ import { ref, computed } from 'vue'
 
 // Suits and ranks
 const suits = ['♠', '♥', '♦', '♣'];
+const suitLetters = { '♠':'S', '♥':'H', '♦':'D', '♣':'C'};
+const suitForVals = { "C":"♣", "D": "♦", "H": "♥", "S":"♠" };
 const ranks = ['A','K','Q','J','10','9','8','7','6','5','4','3','2'];
 const handIds = ['N', 'E', 'S', 'W', ''];
 
@@ -40,6 +42,35 @@ function rangeFormula(range) {
         return ">=" + range[0];
     } else if (hasVal(range[1])) {
         return "<=" + range[1];
+    }
+}
+
+function setLispRange(dest, key, vals) {
+    if(vals[0] || vals[1]) {
+        if(Number.isInteger(key) && !dest[key]) {
+            dest[key] = [ 'NIL', 'NIL' ];
+        }
+
+        if(vals[0] === vals[1]) {
+            dest[key] = vals[0];
+        } else {
+            dest[key] = [ (vals[0] || 'NIL'), (vals[1] || 'NIL') ];
+        }
+    }
+}
+
+function lispStr (val) {
+    if(val.constructor == Object) {
+        return "( " + Object.keys(val)
+                            .map((key) => ":" + key + " " + lispStr(val[key]))
+                            .join(" ") 
+                    + ")";
+    } else if (Array.isArray(val)) {
+        return "( " + val.map((elem) => lispStr(elem))
+                         .join(" ") 
+                    + " )";
+    } else {
+        return val;
     }
 }
 
@@ -67,6 +98,22 @@ class Selection {
 
     clear() {
         this.setMode(this.mode);
+    }
+
+    restDef() {
+        if(this.mode == HandMode.SELECT) {
+            return { hand: this.formula() };
+        } else {
+            var ans = {};
+            setLispRange(ans, 'hcp', this.data['Overall']['HCP']);
+            suits.forEach((suit) => {
+                            const letter = suitLetters[suit];
+                            setLispRange(ans, letter, this.data[suit]['Length']);
+                            setLispRange(ans[letter], 2, this.data[suit]['HCP']);
+                        });
+
+            return { def: lispStr(ans) };
+        }
     }
 
     formula() {
@@ -181,7 +228,7 @@ function prevSuit() { suitIndex.value = (suitIndex.value - 1 + suits.length) % s
 const formula = computed(() => edited.value.formula()); 
 
 const simulationReport = ref("");
-async function runSimulation() {
+async function playSimulation() {
     const response = await fetch("api/simdeal", {
                                     method: "POST",
                                     headers: {
@@ -203,6 +250,105 @@ async function runSimulation() {
     simulationReport.value = body;
 }
 
+function probabilityPercent(x) {
+    return (x*100).toFixed(2) + "%";
+}
+
+function mcRepVal(x) {
+    if(Array.isArray(x) && x.length == 0)
+        return 'NT';
+
+    const symbol = suitForVals[x];
+    if(symbol)
+        return symbol;
+    else
+        return x;
+}
+
+function mcTable (data) {
+    var ans = [];
+
+    function self(indent, cell) {
+        var row = Array(indent).fill("»");
+
+        var levels;
+        if(Array.isArray(cell[0])) {
+            row = row.concat(cell[0].map(mcRepVal));
+            row.push(probabilityPercent(cell[1]));
+            levels = cell[0].length;
+        } else {
+            row.push(mcRepVal(cell[0]))
+            row.push(probabilityPercent(cell[1]));
+            levels = 1;
+        }
+
+        ans.push(row);
+        for(var subcase of cell.splice(2)) {
+            self(indent+levels, subcase);
+        }
+    }
+
+    for(var x of data) {
+        self(0, x);
+    }
+
+    return ans;
+}
+
+async function mcSimulation() {
+    var response = await fetch("api/mc", {
+                                   method: "POST",
+                                   headers: {
+                                      'Accept': 'application/json',
+                                      'Content-Type': 'application/json',
+                                   },
+                                   body: JSON.stringify({
+                                       defs: hands.value.pushed().map((hand) => hand.restDef())
+                                   })
+                               });
+
+    if(!response.ok) {
+        const text = await response.text(); // get response body (error message)
+        console.error("Fetch failed:", response.status, response.statusText, text);
+        alert(`Backend error ${response.status}: ${response.statusText}\n${text}`);
+        return;
+    }
+
+    var body = await response.json();
+    const jid = body["JOB-ID"];
+    simulationReport.value = { DATA: mcTable(body['DATA']) };
+
+    while(body["STATUS"] === "IN-PROGRESS") {
+        await new Promise(resolve => setTimeout(resolve, 5000));
+        response = await fetch("api/mc/" + jid, {
+                                   method: "GET",
+                                   headers: {
+                                      'Accept': 'application/json',
+                                      'Content-Type': 'application/json',
+                                   }
+                               });
+
+        if(!response.ok) {
+            const text = await response.text(); // get response body (error message)
+            console.error("Fetch failed:", response.status, response.statusText, text);
+            alert(`Backend error ${response.status}: ${response.statusText}\n${text}`);
+            return;
+        }
+
+        body = await response.json();
+        simulationReport.value = { DATA: mcTable(body['DATA']) };
+    }
+}
+
+async function runSimulation() {
+    if(hands.value.pushed().filter((hand) => hand.mode === HandMode.RANDOM).length == 0
+          && hands.value.pushed().length >= 3) {
+       return playSimulation();
+    } else {
+       return mcSimulation();
+    }
+}
+
 </script>
 
 <template>
@@ -220,23 +366,35 @@ async function runSimulation() {
       </ul>
 
       <!-- Start simulation button -->
-      <div v-if="hands.pushed().length == 4">
         
       <button 
         @click="runSimulation()" 
-        :disabled="hands.pushed().length < 4"
+        :disabled="hands.pushed().length == 0"
         class="mt-4 w-full py-2 rounded-xl font-semibold"
         :class="{
-            'bg-gray-500': hands.pushed().length < 4,
-            'bg-red-200 hover:bg-red-300': hands.pushed().length == 4 
+            'bg-gray-500': hands.pushed().length == 0,
+            'bg-red-200 hover:bg-red-300': hands.pushed().length > 0 
         }"
       >
         Start simulation
       </button>
-      </div>
 
       <!-- Simulation report -->
-      <div v-if="simulationReport" class="mt-8">
+      <!-- 1. MC simulation -->
+      <div v-if="simulationReport && simulationReport['DATA']" class="mt-8">
+        <p>Probability profile for that kind of deal:</p>
+
+        <table class="mt-2">
+            <tr v-for="row of simulationReport['DATA']">
+                <td v-for="cell of row" class="pl-2 pr-2 text-center">
+                    {{cell}}
+                </td>
+            </tr>
+        </table>
+      </div>
+
+      <!-- 2. Deal simulation -->
+      <div v-if="simulationReport && simulationReport['SCORE']" class="mt-8">
         <p>Probable outcome is {{simulationReport['SCORE'][0]}} vs defence {{simulationReport['SCORE'][1]}}</p>
         <div class="grid grid-cols-2 mt-4">
           <div v-for="axis in simulationReport['POWER']">

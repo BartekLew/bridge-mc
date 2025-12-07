@@ -1041,7 +1041,7 @@
            ,defs)
         `(fold (lambda (acc val)
                   (destructuring-bind (&key ,@params &allow-other-keys) val
-                      (if (not ,@params) acc
+                      (if (not ,@params) ,default
                         ,expression)))
            ,initial
            ,defs)))
@@ -1076,7 +1076,8 @@
            (min-hcp (if (= (hands-in-supply supply) (+ (length other-defs) 1))
                         (fold-param-lists total-hcp other-defs
                            (hcp) (if (= acc 0) acc
-                                               (max (-? acc (if (listp hcp) (second hcp) hcp)) 0)))
+                                    (max (-? acc (if (listp hcp) (second hcp) hcp)) 0))
+                           :default 0)
                         0))
            (max-hcp (fold-param-lists total-hcp other-defs
                         (hcp) (-? acc (if (listp hcp) (first hcp) hcp)))))
@@ -1131,12 +1132,17 @@
       '(:hcp (3 11))
       equal)
     
+(test (infer-hcp-range '((6 1 1 1 1) (9 0 0 1 0) (9 0 0 0 0) (6 1 1 1 1))
+                        '(:hcp (0 11)) '() '(:HCP (0 10)))
+      '(:hcp (0 11))
+      equal)
+    
 (defun infer-suit-ranges (supply base-params &rest other-defs)
     (let* ((suitlen (mapcar (curry #'apply #'+) supply))
            (min-len (if (= (hands-in-supply supply) (+ (length other-defs) 1))
                         (fold-param-lists suitlen other-defs
                             (c d h s) (if (= acc 0) acc
-                                                    (-? acc (if (listp val) (second val) val)))
+                                          (-? acc (if (listp val) (or (second val) (first val)) val)))
                             :default 0)
                         (loop for _ in suitlen collect 0)))
            (max-len (fold-param-lists suitlen other-defs
@@ -1209,10 +1215,20 @@
    (append (apply #'infer-hcp-range `(,supply ,base ,@others))
            (apply #'infer-suit-ranges `(,supply ,base ,@others))))
 
+(test (INFER-DISTGEN-PARAMS '((7 0 0 1 0) (4 0 1 0 0) (5 1 0 0 1) (3 0 1 1 1)) 
+                            '(:HCP (6 10) :H (7 NIL)) 
+                            '((:HCP (12 22) :D (4 NIL))))
+      '(:HCP (6 7) :D (1 1) :H (7 7))
+      equal)
+
 (defclass deal ()
     ((defs :initarg :~ :initform nil :reader defs)
      (const-hands :initarg := :initform nil :reader const-cands)
      (rootgen :initform nil)))
+
+(defmethod print-object ((this deal) out)
+    (with-slots (const-hands defs) this
+        (format out "DEAL<~A, ~A>" const-hands defs)))
 
 (defmethod build ((this deal))
     (with-slots (defs const-hands rootgen) this
@@ -1548,10 +1564,13 @@
     ((suits :reader suits)
      (id :reader handid)))
 
-(defmethod initialize-instance ((self hand) &key = id)
+(defmethod initialize-instance ((self hand) &key = remaining id)
     (setf (slot-value self 'id) (or id (format nil "~x" (random 255))))
-    (setf (slot-value self 'suits) (mapcar (lambda (x) (sort x #'<))
-                                           =)))
+    (setf (slot-value self 'suits) 
+        (if = (mapcar (lambda (x) (sort x #'<)) =)
+              (hand (second (remove-cards (apply #'append
+                                                 (mapcar (f* #'pretty-tree #'unhand) remaining))
+                                          (all-cards)))))))
 
 (defun str2suitno (x)
     (position x '("♣" "♦" "♥" "♠") :test #'equal))
@@ -2927,7 +2946,7 @@ W: ♣ A1087 ♦ KQ5 ♥ 762 ♠ Q102"))
     (subseq (sort (mapcar #'length declarer) #'<) 0 2))
 
 (defun best-tricks (trump n e s w)
-    (second (score (play-deal trump  (mkhand n) (mkhand e) (mkhand s) (mkhand w)))))
+    (second (score (play-deal trump  n e s w))))
 
 (defun best-tricks* (_ n e s w)
     (declare (ignore _))
@@ -2935,9 +2954,10 @@ W: ♣ A1087 ♦ KQ5 ♥ 762 ♠ Q102"))
                                nil
                             (loop for i from 0 to 3
                                   for st in '(c d h s)
-                                  collect (list st (+ (length (nth i n)) (length (nth i s)))))))))
-        (let ((in-suit (second (score (play-deal trump  (mkhand n) (mkhand e) (mkhand s) (mkhand w)))))
-              (non-trump (second (score (play-deal nil  (mkhand n) (mkhand e) (mkhand s) (mkhand w))))))
+                                  collect (list st (+ (length (hand-suit n i)) 
+                                                      (length (hand-suit s i)))))))))
+        (let ((in-suit (second (score (play-deal trump  n e s w))))
+              (non-trump (second (score (play-deal nil  n e s w)))))
            (list trump in-suit non-trump))))
 
 (defun contract-score (suit tricks &key vulnerable double level)
@@ -2980,26 +3000,86 @@ W: ♣ A1087 ♦ KQ5 ♥ 762 ♠ Q102"))
     (apply #'+ (mapcar (f** (curry #'nth (suitno trump)) #'length)
                        (list n s))))
 
+(defclass async-list ()
+    ((generator :initarg :!)
+     (data :reader data)
+     (length)
+     (threads :reader threads)))
+
+(defmethod initialize-instance ((this async-list) &key ! len thread-name)
+    (with-slots (generator data length threads) this
+        (setf generator !)
+        (setf length len)
+        (setf data (list (funcall !)))
+        (setf threads (let ((end data))
+                        (list (bt:make-thread 
+                                    (lambda ()
+                                       (loop for i from 1 below len
+                                             do (let ((elem (apply generator '())))
+                                                   (setf (cdr end) (list elem))
+                                                   (setf end (cdr end)))))
+                                    :name (or thread-name
+                                              (format nil "async-list<~A, ~A>"
+                                                      generator len))))))))
+
+(defmethod async-map ((this async-list) mapper &key thread-name)
+    (with-slots (data length threads) this
+        (let* ((mapped (list (funcall mapper (car data))))
+               (thread (let ((scur data)
+                             (dcur mapped))
+                         (bt:make-thread (lambda ()
+                                           (loop for i from 1 below length
+                                                 do (let ((elem (funcall mapper (car scur))))
+                                                        (setf (cdr dcur) (list elem))
+                                                        (loop while (not (cdr scur))
+                                                              do (sleep 1))
+                                                        (setf scur (cdr scur) )
+                                                        (setf dcur (cdr dcur)))))
+                                        :name (or thread-name (format nil "async-map<~A>" mapper))))))
+            (setf data mapped)
+            (setf threads (cons thread threads))))
+    this)
+
+(defmethod cancel ((this async-list))
+    (with-slots (threads) this
+        (loop for thread in threads
+              do (if (bt:thread-alive-p thread) (bt:destroy-thread thread)))))
+
 (defclass mc-case ()
     ((props :initarg :=)
      (dealgen :initarg :!)
      (trump :initarg :trump :initform nil)
-     (data :initform nil :initarg :data)))
+     (data :initform nil :initarg :data)
+     (threads :initform nil)))
 
 (defmethod print-object ((self mc-case) out)
     (with-slots (props dealgen trump) self
         (format out "MC-CASE{~A->~A @ ~A}" dealgen props trump)))
 
 (defmethod sim ((self mc-case) runs)
-    (with-slots (props dealgen trump data) self
-        (loop for i from 0 to runs
-              do (let ((deal (mapcar #'suits (eval dealgen))))
-                    (setf data (cons (cons  deal
-                                            (mapcar (lambda (prop)
-                                                       (apply prop (cons trump deal)))
-                                                    props))
-                                     data)))))
-    self)
+    (with-slots (props dealgen trump data threads) self
+        (let* ((deals (make-instance 'async-list 
+                                  :! (curry #'eval dealgen)
+                                  :len runs
+                                  :thread-name (format nil "dealgen<~S>" dealgen)))
+               (ans (async-map deals 
+                               (lambda (hands)
+                                    (cons hands (mapcar (curry* #'apply (prop) 
+                                                            (prop (cons trump hands)))
+                                                        props)))
+                               :thread-name (format nil "sim{~A->~A}" dealgen props))))
+            (if data (let ((end (last data)))
+                             (setf (cdr end) (data ans)))
+                     (setf data (data ans)))
+
+            (setf threads (append threads (threads ans)))
+            
+            ans)))
+
+(defmethod threads ((self mc-case))
+    (with-slots (threads) self
+        (setf threads (filter #'bt:thread-alive-p threads))
+        threads))
 
 (defmethod add-prop ((self mc-case) &rest new-props)
     (with-slots (props trump data) self
@@ -3031,7 +3111,7 @@ W: ♣ A1087 ♦ KQ5 ♥ 762 ♠ Q102"))
 
 (defmethod show-deals ((self mc-case) filter)
     (loop for deal in (choose self filter)
-      do (print-deal (car deal))))
+      do (format T "~A" (car deal))))
 
 (defmethod save ((self mc-case) filename)
     (with-open-file (out filename

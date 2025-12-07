@@ -123,8 +123,11 @@
     (> (or (suitno a) 4)
        (or (suitno b) 4)))
 
-(defun sim-deal (req)
-    (let* ((hands (mapcar #'str2hand (getf req :|hands|)))
+(defun sim-deal (defhands)
+    (let* ((hands (if (= (length defhands) 4)
+                      defhands (append defhands
+                                       (list (make-instance 'hand :remaining defhands)))))
+                                        
            (results (list (sim-axis hands) (sim-axis (roll 1 hands))))
            (winner (let ((t1 (seektree '(0 2) results))
                          (t2 (seektree '(1 2) results)))
@@ -208,6 +211,70 @@
 
 (defvar *user-validator* (string-validator :length 4))
 
+(defun close-list (lst base)
+    (if (< (length lst) (length base))
+        (append lst (subseq base (length lst)))
+        lst))
+
+(defclass jobs ()
+    ((cases) (last-id) (lock)))
+
+(defmethod initialize-instance ((this jobs) &key)
+    (with-slots (cases last-id lock) this
+        (setf cases (make-hash-table))
+        (setf last-id -1)
+        (setf lock (bt:make-lock))))
+
+(defmethod add-job ((this jobs) mcc)
+    (with-slots (cases last-id lock) this
+        (bt:with-lock-held (lock)
+            (incf last-id)
+            (setf (gethash last-id cases) mcc)
+            (list last-id mcc))))
+     
+(defmethod get-case ((this jobs) id)
+    (with-slots (cases) this
+        (gethash id cases)))
+
+(defmethod cancel ((this jobs))
+    (with-slots (cases) this
+        (loop for x being the hash-values of cases
+              do (loop for thread in (threads x)
+                       do (bt:destroy-thread thread)))))
+
+(defparameter *jobs* (make-instance 'jobs))
+
+(defun mc-deal (defs)
+    (let-from! (mapcar #'reverse (divlist (list (f* #'second #'type-of (curry #'eq 'hand)))
+                                          (zip-id defs)))
+               (consts ranged)
+       (let* ((d (make-instance 'deal := (mapcar (f* #'second #'pretty-tree) consts)
+                                      :~ (mapcar #'second ranged)))
+              (reorder (close-list (mapcar #'first (append consts ranged)) '(0 1 2 3))))
+         (let-from! (add-job *jobs* (make-instance 'mc-case :! `(reorder (build ,d) ',reorder)
+                                                            := '(best-outcomes)))
+                    (id mc)
+           (sim mc 500)
+           (sleep 5)
+           `(:status in-progress :job-id ,id
+             :data ,(histogram (mapcar (f* #'first (curry* #'reorder (x) (x '(1 3))))
+                                                   (select mc))))))))
+
+(defun hand-or-def-parser (defs)
+    (fold #'combine
+          (make-instance 'result)
+          (mapcar (lambda* (type val)
+                     (make-instance 'result :ok (cond ((eq type :|hand|) (str2hand val))
+                                                      (t (read-from-string val)))))
+                  defs)))
+
+(defun substr= (ref str)
+    (string= ref (subseq str 0 (length ref))))
+
+(defun json-response (retcode response)
+    `(,retcode (:content-type "application-json")
+      (,(jonathan:to-json response))))
+
 (defun app (env)
   (let ((path (getf env :path-info)))
     (cond
@@ -230,6 +297,18 @@
           (simple-endpoint env '(:|hands|) #'sim-deal
                                :parse-args (list (f* (curry #'mapcar #'hand-parser)
                                                      (curry #'fold #'combine (make-instance 'result))))))
+      ((string= path "/api/mc")
+          (simple-endpoint env '(:|defs|) #'mc-deal'
+                               :parse-args (list #'hand-or-def-parser)))
+      ((substr= "/api/mc/" path)
+       (let ((job-id (read-from-string (subseq path (length "/api/mc/")))))
+          (let ((job (get-case *jobs* job-id)))
+             (if job (json-response 200 `(
+                            :status ,(if (threads job) :in-progress :success)
+                            :data ,(histogram (mapcar (f* #'first (curry* #'reorder (x) (x '(1 3))))
+                                              (select job)))))
+                     (json-response 400 `(:status :not-found))))))
+              
       (t
        `(404 (:content-type "text/plain") ("Not found"))))))
 
