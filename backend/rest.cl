@@ -14,6 +14,7 @@
 ; along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 (load "bridge.cl")
+(ql:quickload '(:clack :clack-cors :jonathan :flexi-streams))
 
 (defclass table ()
     ((users :initform '() :reader users)
