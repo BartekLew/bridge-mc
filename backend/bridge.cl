@@ -21,6 +21,8 @@
 (ql:quickload '(:bordeaux-threads))
 
 (defun id (x) x)
+(defun id* (&rest x)
+    x)
 
 (defun car* (x)
     (if (and (listp x) (= (length x) 1)) (car x) x))
@@ -31,6 +33,7 @@
 (defun list-lead (len lst)
     (if (<= (length lst) len) lst 
                               (subseq lst 0 len)))
+
 (defun ensure-list (x)
     (if (listp x) x (list x)))
 
@@ -92,6 +95,11 @@
                         collect (list (nth i names)
                                      `(nth ,i ans)))
                  ,@body))))
+
+(defmacro with-results (exps &body body)
+    `(let ,(loop for exp in exps
+                 collect `(,(car exp) ,exp))
+        ,@body))
 
 (defmacro lambda* (args &body body)
     `(lambda (arg)
@@ -177,6 +185,20 @@
 
 (test (filter (curry #'< 3) '(1 2 3 4 5 4 3 2 1)) '(4 5 4) equal)
 
+(defun matchlist (pattern mapper list &optional args)
+    (cond ((not pattern) (apply mapper (reverse args)))
+          ((not list) nil)
+          ((eq (car pattern) '_)
+            (matchlist (cdr pattern) mapper (cdr list) (cons (car list) args)))
+          (t (if (equal (car pattern) (car list))
+                 (matchlist (cdr pattern) mapper (cdr list) args)))))
+        
+(test (matchlist '(< hcp _) (curry #'+ -1) '(< hcp 5))
+      4 eq)
+
+(test (matchlist '(>= S _) #'id '(>= S 5))
+      5 eq)
+
 (defun reorder (lst indexes)
     (loop for i in indexes
           collect (nth i lst)))
@@ -246,6 +268,23 @@
 
 (defun min? (&rest args)
     (if args (apply #'min args) 13))
+
+(defun optimum (exp args &optional best val)
+    (cond ((not args) (list best val))
+          ((not best) (let ((a (funcall exp (first args)))
+                           (b (funcall exp (second args))))
+                        (if (and a b) (optimum exp (nthcdr 2 args) 
+                                                   (if (> a b) (first args)
+                                                               (second args))
+                                                   (if (> a b) a b)))))
+          (T (let ((newval (funcall exp (first args))))
+                (if newval (optimum exp (cdr args) 
+                              (if (< val newval) (first args) best)
+                              (if (< val newval) newval val)))))))
+                
+(test (optimum (curry #'second) '((a 4) (b 8)))
+      '((b 8) 8)
+      equal)
 
 (defun randcar-weights (lst)
     (let* ((total-weight (apply #'+ (mapcar #'first lst)))
