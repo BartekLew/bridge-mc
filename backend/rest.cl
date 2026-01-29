@@ -243,13 +243,27 @@
 
 (defparameter *jobs* (make-instance 'jobs))
 
+(defun normdef (defs)
+    (loop for def in defs
+          collect (cond ((numberp def) `(,def ,def))
+                        ((and (listp def)
+                              (numberp (third def)))
+                            `(,(first def) ,(second def) (,(third def) ,(third def))))
+                        (t def))))
+
+(defun invert-id (ids)
+    (mapcar #'first (sort (zip-id ids) (lambda (a b) (< (second a) (second b))))))
+
+(test (invert-id '(2 0 1 3)) '(1 2 0 3) equal)
+(test (invert-id '(3 2 0 1)) '(2 3 1 0) equal)
+
 (defun mc-deal (defs)
     (let-from! (mapcar #'reverse (divlist (list (f* #'second #'type-of (curry #'eq 'hand)))
                                           (zip-id defs)))
                (consts ranged)
        (let* ((d (make-instance 'deal := (mapcar (f* #'second #'pretty-tree) consts)
-                                      :~ (mapcar #'second ranged)))
-              (reorder (close-list (mapcar #'first (append consts ranged)) '(0 1 2 3))))
+                                      :~ (mapcar (f* #'second #'normdef) ranged)))
+              (reorder (close-list (invert-id (mapcar #'first (append consts ranged))) '(0 1 2 3))))
          (let-from! (add-job *jobs* (make-instance 'mc-case :! `(reorder (build ,d) ',reorder)
                                                             := '(best-outcomes)))
                     (id mc)
@@ -304,7 +318,7 @@
           (let ((job (get-case *jobs* job-id)))
              (if job (json-response 200 `(
                             :status ,(if (threads job) :in-progress :success)
-                            :data ,(histogram (mapcar (f* #'first (curry* #'reorder (x) (x '(1 3))))
+                            :data ,(histogram (mapcar (f* #'first (curry* #'reorder (x) (x '(1 0 3))))
                                               (select job)))))
                      (json-response 400 `(:status :not-found))))))
               
