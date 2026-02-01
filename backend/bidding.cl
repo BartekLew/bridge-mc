@@ -454,3 +454,26 @@
       '(3 S)
       equal)
 
+(defclass bidding ()
+    ((deal :initarg deal)
+     (bids :initform nil)
+     (meanings :initform '(nil nil nil nil))
+     (bid-scheme :initform openings)))
+
+(defmethod next ((this bidding))
+    (with-slots (deal bids meanings bid-scheme)
+        (let-from! (fold (lambda (acc val)
+                            (if acc acc
+                              (let ((bid (choose-bid (nth val deal) bid-scheme)))
+                                (if bid (list val bid)))))
+                         nil
+                         '(0 1 2 3))
+                   (passes bid)
+            (if passes `(,(roll (- 0 passes 1) deal) (,@(repeat passes nil) ,bid)))))
+
+(defparameter b (make-instance 'bidding
+                    :deal (list (str2hand "N: ♠ Q1097 ♥ 3 ♦ KJ1063 ♣ K102")
+                                (str2hand "E: ♠ 62 ♥ AJ75 ♦ A942 ♣ 987")
+                                (str2hand "S: ♠ AKJ5 ♥ K1064 ♦ Q87 ♣ A6")
+                                (str2hand "W: ♠ 843 ♥ Q982 ♦ 5 ♣ QJ543"))))
+(next b)
