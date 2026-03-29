@@ -2903,6 +2903,7 @@ W: ♣ A1087 ♦ KQ5 ♥ 762 ♠ Q102"))
 (defmethod after-action ((this deal-play) action)
     (with-slots (hands outcome trump cache active passive) this
         (let ((ans (apply (cond ((functionp action) action)
+                                ((and (listp action) (eq (car action) 'high)) (lambda (n e s w) (simple-trick trump (second action) n e s w :use-highest T)))
                                 ((eq action 'play-strategy) (curry #'play-strategy active cache))
                                 ((eq action 'mk-route) (curry #'mk-route (routes active)))
                                 (t (curry #'simple-trick trump action)))
@@ -2917,6 +2918,9 @@ W: ♣ A1087 ♦ KQ5 ♥ 762 ♠ Q102"))
                                     :active (if (won? ans) new-a new-p)
                                     :passive (if (won? ans) new-p new-a)))))))
     
+(defmethod after-actions ((this deal-play) &rest actions)
+    (fold #'after-action this actions)) 
+
 (defmethod play-outcome ((this deal-play))
     (with-slots (hands trump cache active passive outcome) this
         (let ((any-suit (position-if #'id (suits (first hands))))
