@@ -51,11 +51,7 @@ function setLispRange(dest, key, vals) {
             dest[key] = [ 'NIL', 'NIL' ];
         }
 
-        if(vals[0] === vals[1]) {
-            dest[key] = vals[0];
-        } else {
-            dest[key] = [ (vals[0] || 'NIL'), (vals[1] || 'NIL') ];
-        }
+        dest[key] = [ (vals[0] || 'NIL'), (vals[1] || 'NIL') ];
     }
 }
 
@@ -208,6 +204,8 @@ class Hands {
 
 const hands = ref(new Hands());
 const edited = computed(() => hands.value.edited());
+const measures = ref("");
+const selectMeasures = ref("");
 
 const suitIndex = ref(0)
 const currentSuit = computed(() => suits[suitIndex.value])
@@ -295,7 +293,7 @@ function mcTable (data) {
     return ans;
 }
 
-async function mcSimulation() {
+async function mcSimulation(measures) {
     var response = await fetch("api/mc", {
                                    method: "POST",
                                    headers: {
@@ -303,7 +301,8 @@ async function mcSimulation() {
                                       'Content-Type': 'application/json',
                                    },
                                    body: JSON.stringify({
-                                       defs: hands.value.pushed().map((hand) => hand.restDef())
+                                       defs: hands.value.pushed().map((hand) => hand.restDef()),
+                                       measures: measures
                                    })
                                });
 
@@ -321,7 +320,10 @@ async function mcSimulation() {
     while(body["STATUS"] === "IN-PROGRESS") {
         await new Promise(resolve => setTimeout(resolve, 5000));
         response = await fetch("api/mc/" + jid, {
-                                   method: "GET",
+                                   method: "POST",
+                                   body: JSON.stringify({
+                                        measures: selectMeasures.value.split(" ").filter(Boolean)
+                                   }),
                                    headers: {
                                       'Accept': 'application/json',
                                       'Content-Type': 'application/json',
@@ -345,7 +347,7 @@ async function runSimulation() {
           && hands.value.pushed().length >= 3) {
        return playSimulation();
     } else {
-       return mcSimulation();
+       return mcSimulation(measures.value.split(" ").filter(Boolean));
     }
 }
 
@@ -365,6 +367,11 @@ async function runSimulation() {
         </li>
       </ul>
 
+      <input type="string"
+             v-model="measures"
+             style="width:100%"
+             class="bg-gray-200 rounded-2xl p-2 shadow-sm text-center mb-0 mt-1 border" /> 
+
       <!-- Start simulation button -->
         
       <button 
@@ -378,6 +385,11 @@ async function runSimulation() {
       >
         Start simulation
       </button>
+
+      <input type="string"
+             v-model="selectMeasures"
+             style="width:100%"
+             class="bg-gray-200 rounded-2xl p-2 shadow-sm text-center mb-0 mt-1 border" /> 
 
       <!-- Simulation report -->
       <!-- 1. MC simulation -->

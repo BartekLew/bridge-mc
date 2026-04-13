@@ -59,17 +59,29 @@
                                   '=)))
                   (with-slots (level suit declarer double? outcome) this
                     (setf level level*)
-                    (setf suit (let ((suit** (cdr (assoc suit* '((c . ♣) (d . ♦) (h . ♥) (s . ♠))))))
-                                  (if suit** suit** suit*)))
+                    (setf suit suit*)
                     (setf declarer declarer*)
                     (setf double? double*)
                     (setf outcome outcome*)))))))))
                     
+(defmethod suit-unicode ((this contract))
+    (with-slots (suit) this
+        (cdr (assoc suit '((c . ♣) (d . ♦) (h . ♥) (s . ♠) (nt . nt) (ba .ba))))))
+
 (defmethod print-object ((this contract) o)
-    (with-slots (level suit declarer double? outcome) this
-        (format o "~A~A~A~A~A" level suit (or declarer "") 
+    (with-slots (level declarer double? outcome) this
+        (format o "~A~A~A~A~A" level (suit-unicode this) (or declarer "") 
                                  (if double? (string-downcase (format nil "~A" double?)) "")
                                  (or outcome ""))))
+
+(defmethod with-score ((this contract) score)
+    (with-slots (outcome level) this
+        (setf outcome (let ((n (- score (+ 6 level))))
+                        (if (= n 0) '= n)))
+        this))
+                       
+(defmethod suit-sym ((this contract))
+    (if (find (suit this) '(nt ba)) nil (suit this)))
 
 (test (format nil "~A" (make-instance 'contract := "3NTx+1"))
       "3NTx+1"
@@ -82,7 +94,7 @@
 (defmethod base-score ((this contract) &key vulnerable)
     (with-slots (level suit declarer double? outcome) this
         (* (contract-score suit (+ level 6 (if (eq outcome '=) 0
-                                               (read-from-string outcome)))
+                                               (if (stringp outcome) (read-from-string outcome) outcome)))
                           :level level :double double?
                           :vulnerable vulnerable)
            (if (find declarer '(e w)) -1 1))))

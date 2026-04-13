@@ -2934,7 +2934,8 @@ W: ♣ A1087 ♦ KQ5 ♥ 762 ♠ Q102"))
                          (outcome this)))))
 
 (defun play-deal (trump declarer left dummy right)
-    (play-outcome (make-instance 'deal-play :hands (list declarer left dummy right) :trump trump)))
+    (play-outcome (make-instance 'deal-play :hands (list declarer left dummy right)
+                                            :trump (if (not (eq trump 'nt)) trump))))
 
 (test (tricks (peek (play-deal nil (str2hand "♣ AKQ7 ♦ 10 ♥ QJ632 ♠ 832")
                                    (str2hand "♣ J54 ♦ KJ82 ♥ 8 ♠ KQJ95")
@@ -3047,7 +3048,7 @@ W: ♣ A1087 ♦ KQ5 ♥ 762 ♠ Q102"))
                                       (let ((suit-score (contract-score suit suit-tricks))
                                             (nt-score (contract-score nil nt-tricks)))
                                       (if (> nt-score suit-score)
-                                          (list nil nt-tricks)
+                                          (list 'NT nt-tricks)
                                           (list suit suit-tricks)))))))
        (apply #'append outcomes)))
                                     
@@ -3191,6 +3192,14 @@ W: ♣ A1087 ♦ KQ5 ♥ 762 ♠ Q102"))
                 (if sim-count (sim obj sim-count)
                               obj))))))
     
+(defun contract-prop-sym (roll suit)
+    (read-from-string (format nil "contract-~A-~A" roll suit)))
+
+(defun contract-prop (roll suit)
+    (eval `(defun ,(contract-prop-sym roll suit) (_ &rest hands)
+              (declare (ignore _))
+              (apply (curry #'best-tricks ',suit) (roll ,roll hands)))))
+
 (defun partner-clubs (trump &rest hands)
     (declare (ignore trump))
     (labels ((self (hand &optional acc)

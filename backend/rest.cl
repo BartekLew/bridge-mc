@@ -14,6 +14,7 @@
 ; along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 (load "bridge.cl")
+(load "compscore.cl")
 (ql:quickload '(:clack :clack-cors :jonathan :flexi-streams))
 
 (defclass table ()
@@ -241,6 +242,9 @@
               do (loop for thread in (threads x)
                        do (bt:destroy-thread thread)))))
 
+(defmethod syms ((this jobs))
+    (loop for key being the hash-keys of (slot-value this 'cases)  collect key))
+
 (defparameter *jobs* (make-instance 'jobs))
 
 (defun normdef (defs)
@@ -257,7 +261,7 @@
 (test (invert-id '(2 0 1 3)) '(1 2 0 3) equal)
 (test (invert-id '(3 2 0 1)) '(2 3 1 0) equal)
 
-(defun mc-deal (defs)
+(defun mc-deal (defs measures)
     (let-from! (mapcar #'reverse (divlist (list (f* #'second #'type-of (curry #'eq 'hand)))
                                           (zip-id defs)))
                (consts ranged)
@@ -265,13 +269,12 @@
                                       :~ (mapcar (f* #'second #'normdef) ranged)))
               (reorder (close-list (invert-id (mapcar #'first (append consts ranged))) '(0 1 2 3))))
          (let-from! (add-job *jobs* (make-instance 'mc-case :! `(reorder (build ,d) ',reorder)
-                                                            := '(best-outcomes)))
+                                                            := measures))
                     (id mc)
            (sim mc 500)
            (sleep 5)
            `(:status in-progress :job-id ,id
-             :data ,(histogram (mapcar (f* #'first (curry* #'reorder (x) (x '(1 3))))
-                                                   (select mc))))))))
+             :data ,(histogram (mapcar (curry #'apply #'append) (select mc))))))))
 
 (defun hand-or-def-parser (defs)
     (fold #'combine
@@ -280,6 +283,24 @@
                      (make-instance 'result :ok (cond ((eq type :|hand|) (str2hand val))
                                                       (t (read-from-string val)))))
                   defs)))
+
+(defun measure-parser (names)
+    (if (equal names '("")) (make-instance 'result :ok '(best-outcomes))
+        (fold #'combine
+            (make-instance 'result)
+            (mapcar (lambda (name)
+                        (let ((contract (make-instance 'contract := name)))
+                            (make-instance 'result :ok
+                                (eval `(defun ,(read-from-string (format nil "msr-~A" name)) (_ &rest hands)
+                                    (declare (ignore _))
+                                    (let ((tricks (apply #'best-tricks 
+                                                        (cons ',(suit contract)
+                                                            (roll ,(- (position (declarer contract)
+                                                                                '(N E S W)))
+                                                                    hands)))))
+                                        (let ((result (with-score ,contract tricks)))
+                                            (list tricks (base-score result)))))))))
+                    names))))
 
 (defun substr= (ref str)
     (string= ref (subseq str 0 (length ref))))
@@ -311,15 +332,17 @@
                                :parse-args (list (f* (curry #'mapcar #'hand-parser)
                                                      (curry #'fold #'combine (make-instance 'result))))))
       ((string= path "/api/mc")
-          (simple-endpoint env '(:|defs|) #'mc-deal'
-                               :parse-args (list #'hand-or-def-parser)))
+          (simple-endpoint env '(:|defs| :|measures|) #'mc-deal'
+                               :parse-args (list #'hand-or-def-parser #'measure-parser)))
       ((substr= "/api/mc/" path)
        (let ((job-id (read-from-string (subseq path (length "/api/mc/")))))
           (let ((job (get-case *jobs* job-id)))
-             (if job (json-response 200 `(
-                            :status ,(if (threads job) :in-progress :success)
-                            :data ,(histogram (mapcar (f* #'first (curry* #'reorder (x) (x '(1 0 3))))
-                                              (select job)))))
+             (if job (simple-endpoint env '(:|measures|)
+                        (lambda (measures)
+                            `(:status ,(if (threads job) :in-progress :success)
+                              :data ,(histogram (mapcar (curry #'apply #'append)
+                                                    (if measures (select job :fields measures)
+                                                                 (select job)))))))
                      (json-response 400 `(:status :not-found))))))
               
       (t
