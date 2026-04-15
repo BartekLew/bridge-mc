@@ -1220,8 +1220,9 @@
                                                         (error 'bad-range :msg "Can't infer correct limit!"
                                                                :down down :up up))
                                                     `(,key (,down ,up
-                                                            ,@(cdr (apply #'infer-hcp-range
-                                                                         `((,suit-supply) (:hcp ,hcp) ,@suit-hcp)))))))
+                                                            ,@(if suit-hcp
+                                                                  (cdr (apply #'infer-hcp-range
+                                                                              `((,suit-supply) (:hcp ,hcp) ,@suit-hcp))))))))
                                     (t (if (or (> def up-limit)
                                                (< def minlen))
                                            (error 'bad-range :msg "Can't infer correct limit!"
@@ -1267,6 +1268,12 @@
                             '(:HCP (6 10) :H (7 NIL)) 
                             '((:HCP (12 22) :D (4 NIL))))
       '(:HCP (6 7) :D (1 1) :H (7 7))
+      equal)
+
+(test (infer-distgen-params '((9 1 1 1 1) (9 1 1 1 1) (9 1 1 1 1) (9 1 1 1 1)) 
+                            '(:HCP (15 17) :S (5 NIL) :H (4 NIL)) 
+                            NIL)
+      '(:HCP (15 17) :H (4 13) :S (5 13))
       equal)
 
 (defclass deal ()
