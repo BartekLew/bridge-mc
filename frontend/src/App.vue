@@ -205,7 +205,6 @@ class Hands {
 const hands = ref(new Hands());
 const edited = computed(() => hands.value.edited());
 const measures = ref("");
-const selectMeasures = ref("");
 
 const suitIndex = ref(0)
 const currentSuit = computed(() => suits[suitIndex.value])
@@ -293,7 +292,7 @@ function mcTable (data) {
     return ans;
 }
 
-async function mcSimulation(measures) {
+async function mcSimulation(inMeasures) {
     var response = await fetch("api/mc", {
                                    method: "POST",
                                    headers: {
@@ -302,7 +301,7 @@ async function mcSimulation(measures) {
                                    },
                                    body: JSON.stringify({
                                        defs: hands.value.pushed().map((hand) => hand.restDef()),
-                                       measures: measures
+                                       measures: inMeasures
                                    })
                                });
 
@@ -322,7 +321,7 @@ async function mcSimulation(measures) {
         response = await fetch("api/mc/" + jid, {
                                    method: "POST",
                                    body: JSON.stringify({
-                                        measures: selectMeasures.value.split(" ").filter(Boolean)
+                                        measures: measures.value.split(" ").filter(Boolean)
                                    }),
                                    headers: {
                                       'Accept': 'application/json',
@@ -385,11 +384,6 @@ async function runSimulation() {
       >
         Start simulation
       </button>
-
-      <input type="string"
-             v-model="selectMeasures"
-             style="width:100%"
-             class="bg-gray-200 rounded-2xl p-2 shadow-sm text-center mb-0 mt-1 border" /> 
 
       <!-- Simulation report -->
       <!-- 1. MC simulation -->

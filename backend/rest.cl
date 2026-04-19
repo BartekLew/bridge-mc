@@ -269,7 +269,7 @@
                                       :~ (mapcar (f* #'second #'normdef) ranged)))
               (reorder (close-list (invert-id (mapcar #'first (append consts ranged))) '(0 1 2 3))))
          (let-from! (add-job *jobs* (make-instance 'mc-case :! `(reorder (build ,d) ',reorder)
-                                                            := measures))
+                                                            := (or measures '(best-outcomes))))
                     (id mc)
            (sim mc 500)
            (sleep 5)
@@ -301,6 +301,12 @@
                                         (let ((result (with-score ,contract tricks)))
                                             (list tricks (base-score result)))))))))
                     names))))
+
+(defun measure-sym-parser (names)
+    (make-instance 'result :ok (filter (lambda (sym)
+                                            (and sym (ignore-errors (eval `(function ,sym)))))
+                                       (mapcar (f* (curry #'format nil "msr-~A") #'read-from-string)
+                                               names))))
 
 (defun substr= (ref str)
     (string= ref (subseq str 0 (length ref))))
@@ -342,7 +348,8 @@
                             `(:status ,(if (threads job) :in-progress :success)
                               :data ,(histogram (mapcar (curry #'apply #'append)
                                                     (if measures (select job :fields measures)
-                                                                 (select job)))))))
+                                                                 (select job))))))
+                        :parse-args (list #'measure-sym-parser))
                      (json-response 400 `(:status :not-found))))))
               
       (t
