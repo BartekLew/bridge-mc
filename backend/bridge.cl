@@ -516,15 +516,24 @@
 ;; Cards and printing them
 ;; ===========================
 
+(defun suitno (suitsym) 
+    (if (symbolp suitsym)
+        (position suitsym '(c d h s))
+        suitsym))
+
+(defun suit-uc (suit)
+    (if (not suit) 'NT
+        (or (nth (suitno suit) '(♣ ♦ ♥ ♠)) 'NT)))
+
 (defun card (x)
     (let* ((asstr (format nil "~a" x))
-           (suit (read-from-string (subseq asstr 0 1)))
+           (suit (suitno (read-from-string (subseq asstr 0 1))))
            (rank (position (read-from-string (subseq asstr 1))
                            '(2 3 4 5 6 7 8 9 10 J Q K A))))
      (and suit rank (list suit rank))))
 
 (defun cardstr (c)
-    (format nil "~A~A" (nth (first c) '("♣" "♦" "♥" "♠"))
+    (format nil "~A~A" (nth (suitno (first c)) '("♣" "♦" "♥" "♠"))
                        (nth (second c) '(2 3 4 5 6 7 8 9 10 J Q K A))))
 
 (test (card "S10") '(s 8) equal)
@@ -536,11 +545,6 @@
 (defun all-cards ()
     (apply 'append (loop for suit in '(c d h s)
                          collect (loop for rank from 0 to 12 collect (list suit rank)))))
-
-(defun suitno (suitsym) 
-    (if (symbolp suitsym)
-        (position suitsym '(c d h s))
-        suitsym))
 
 ; Comparison function for sorting cards
 (defun suit<> (a b)
@@ -1627,6 +1631,13 @@
               (hand (second (remove-cards (apply #'append
                                                  (mapcar (f* #'pretty-tree #'unhand) remaining))
                                           (all-cards)))))))
+
+(defmethod take-card ((this hand) card)
+    (list card (make-instance 'hand := (loop for suit from 0 to 4
+                                             for cards in (suits this)
+                                             collect (if (eq suit (suitno (first card)))
+                                                         (remove (second card) cards)
+                                                         cards)))))
 
 (defun str2suitno (x)
     (position x '("♣" "♦" "♥" "♠") :test #'equal))
@@ -3009,14 +3020,17 @@ W: ♣ A1087 ♦ KQ5 ♥ 762 ♠ Q102"))
 (defun best-tricks (trump n e s w)
     (second (score (play-deal trump  n e s w))))
 
+(defun longest-suit (&rest hands)
+    (first  (fold (lambda (acc v) (if (or (not acc) (>= (second v) (second acc))) v acc))
+                  nil
+                  (loop for i from 0 to 3
+                        for st in '(c d h s)
+                        collect (list st (+ (length (hand-suit (first hands) i)) 
+                                            (length (hand-suit (third hands) i))))))))
+
 (defun best-tricks* (_ n e s w)
     (declare (ignore _))
-    (let ((trump (first  (fold (lambda (acc v) (if (or (not acc) (>= (second v) (second acc))) v acc))
-                               nil
-                            (loop for i from 0 to 3
-                                  for st in '(c d h s)
-                                  collect (list st (+ (length (hand-suit n i)) 
-                                                      (length (hand-suit s i)))))))))
+    (let ((trump (longest-suit (list n e s w))))
         (let ((in-suit (second (score (play-deal trump  n e s w))))
               (non-trump (second (score (play-deal nil  n e s w)))))
            (list trump in-suit non-trump))))
