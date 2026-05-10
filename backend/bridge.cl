@@ -536,8 +536,8 @@
     (format nil "~A~A" (nth (suitno (first c)) '("♣" "♦" "♥" "♠"))
                        (nth (second c) '(2 3 4 5 6 7 8 9 10 J Q K A))))
 
-(test (card "S10") '(s 8) equal)
-(test (card "CK") '(c 11) equal)
+(test (card "S10") '(3 8) equal)
+(test (card "CK") '(0 11) equal)
 
 (defun print-card (x)
     (format nil "~A~A" (first x) (nth (second x)
@@ -2197,9 +2197,11 @@ W: ♣ A1087 ♦ KQ5 ♥ 762 ♠ Q102"))
 
 (defmethod print-object ((self outcome) out)
     (format out "OUTCOME<~A => ~A / ~A>" (mapcar (curry #'mapcar #'cardstr) (tricks self)) 
-                                         (remaining self) (score self)))
+                                         (if (> (apply #'+ (mapcar #'length (suits (car (remaining self)))))
+                                                0) (remaining self)) 
+                                         (score self)))
 
-(defmethod new-outcome (trick)
+(defmethod new-outcome ((trick trick))
     (make-instance 'outcome :tricks (list (cards trick))
                             :winners (list (nth (winner trick) (cards trick)))
                             :winner-nos (list (winner trick))
@@ -2231,6 +2233,11 @@ W: ♣ A1087 ♦ KQ5 ♥ 762 ♠ Q102"))
                                              collect (+ a b))
                                 :roll (mod (+ roll (slot-value other 'roll)) 4)
                                 :remaining (remaining other))))
+
+(defmethod new-outcome ((tricks list))
+    (fold #'add-outcome*
+          (new-outcome (car tricks))
+          (mapcar #'new-outcome (cdr tricks))))
 
 (defmethod won? ((self outcome))
     (if (winner-nos self)
