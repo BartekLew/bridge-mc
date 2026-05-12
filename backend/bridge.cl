@@ -3037,7 +3037,7 @@ W: ♣ A1087 ♦ KQ5 ♥ 762 ♠ Q102"))
 
 (defun best-tricks* (_ n e s w)
     (declare (ignore _))
-    (let ((trump (longest-suit (list n e s w))))
+    (let ((trump (longest-suit n e s w)))
         (let ((in-suit (second (score (play-deal trump  n e s w))))
               (non-trump (second (score (play-deal nil  n e s w)))))
            (list trump in-suit non-trump))))
