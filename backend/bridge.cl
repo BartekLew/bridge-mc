@@ -187,6 +187,7 @@
 
 (defun matchlist (pattern mapper list &optional args)
     (cond ((not pattern) (apply mapper (reverse args)))
+          ((not (listp list)) nil)
           ((not list) nil)
           ((eq (car pattern) '_)
             (matchlist (cdr pattern) mapper (cdr list) (cons (car list) args)))

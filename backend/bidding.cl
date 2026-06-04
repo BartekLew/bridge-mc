@@ -257,7 +257,37 @@
   (let ((base-level (+ level 1)))
     `(((,base-level H) . (>= H 4))
       ((,base-level S) . (>= S 4))
-      ((,base-level D) . T))))
+      ((,base-level D) . (and (< H 4) (< S 4))))))
+
+;; Bidding scheme selection based on bidding sequence (history-aware).
+(defun bidding-scheme-for (bids meanings)
+    (cond ((equal bids '((1 NT))) (nt-responses 1))
+          ((equal bids '((2 NT))) (nt-responses 2))
+          ((and (= (length bids) 1) (eq (seektree '(0 0) bids) 1))
+              (basic-responses (first bids)))
+          ((equal bids '((2 C))) 2c-responses)
+          ((equal bids '((1 NT) (2 C)))
+              (stayman-responses 1))
+          ((equal bids '((2 NT) (2 C)))
+              (stayman-responses 2))
+          (t (further-bid (first meanings) (second meanings) (car (last bids))))))
+
+;; Responder's rebids after opener answers 2H/3H to Stayman (1NT/2NT context).
+;; Covers:
+;; - Fit in hearts: invite (3H) with 8-9 HCP, bid game (4H) with 10-15 HCP.
+;; - No 4 hearts: 2NT invite (8-9 HCP) or 3NT sign-off (10-15 HCP).
+;; - Minor 5-card with 4 spades: 3C/3D (natural) showing 5+ minor and 4 spades.
+
+;; Responder's rebids after opener denies a major (2D/3D) to Stayman.
+;; - No 4-card major: 2NT invite (8-9 HCP) or 3NT sign-off (10-15 HCP).
+
+;; Responder's rebids after opener answers 2S/3S to Stayman (1NT/2NT context).
+;; - Fit in spades: invite (3S) with 8-9 HCP, bid game (4S) with 10-15 HCP.
+;; - No 4 spades: 2NT invite (8-9 HCP) or 3NT sign-off (10-15 HCP).
+;; - Minor 5-card with 4 hearts: 3C/3D (natural) showing 5+ minor and 4 hearts.
+
+;; Opener corrections after responder signs off in 3NT in a Stayman auction.
+;; If opener holds both 4-card majors, correct to a major game (prefer spades).
 
 ;; Responses after a strong 2C opening: distinguish strength/shape and balanced vs unbalanced weak hands.
 ;; It assumes 2D response is an only strong response.
@@ -364,10 +394,11 @@
                                                                         (mapcar (curry extractor measure)
                                                                                 (cdr other)))))
                                                     (if otherval `(,op ,measure ,(+ val otherval)))))
-                                              (cdr base)))
+                                              (filter #'listp (cdr base))))
                               (self base `(and ,other))))
                       (t (self `(and ,base) other)))))
-         (self a b)))
+         (if (not a) b
+             (self a b))))
 
 (test (combine-shapes '(and (>= hcp 12) (<= hcp 22) (>= S 5))
                       '(and (>= hcp 10) (>= H 5)))
@@ -397,9 +428,9 @@
             (filter #'id (mapcar fn tail))
             (apply fn bid-meaning))))
 
-;; Extract useful metadata from partner rules:
+;; Extract useful metadata from shape definitions:
 ;; - max-hcp/min-hcp: strength bounds
-;; - longers: minimal suit lengths for candidate contracts
+;; - longers: long suits for fit seeking
 (defun max-hcp (bid-meaning)
     (find-in-bid bid-meaning (curry #'match-smaller 'hcp))) 
 
@@ -456,10 +487,10 @@
 ;; Note: (- 8 len) — we aim for an 8+ card fit across the partnership.
 (defun suit-biddef (bid min-hcp max-hcp min-losers max-losers len)
     (let ((suit (second bid)))
-        (cons bid `(and (or (>= hcp ,min-hcp)
-                            (<= loosers ,max-losers))
-                        (<= hcp ,max-hcp)
-                        (>= loosers ,min-losers)
+        (cons bid `(and (or ,(if min-hcp `(>= hcp ,min-hcp) T)
+                            ,(if max-losers `(<= loosers ,max-losers) T))
+                        ,@(if max-hcp `((<= hcp ,max-hcp)))
+                        ,@(if min-losers `((>= loosers ,min-losers)))
                         (>= ,suit ,(- 8 len))))))
 
 ;; Further-bid generator:
@@ -473,6 +504,7 @@
 (defun further-bid (known-shape partner-shape last-bid)
     (let ((my-min (min-hcp known-shape)))
         (with-results ((min-hcp partner-shape)
+                       (max-hcp partner-shape)
                        (longers partner-shape))
             `(,@(loop for longer in longers
                       append (let-from* longer (suit len)
@@ -491,11 +523,19 @@
                                                       (+ game-loosers 1 (floor (/ min-hcp 3)))
                                                       len))
                                      ,(if (>= invite-jump 0)
+                                        (if max-hcp
                                           (suit-biddef (jump-bid suit last-bid (if (= invite-jump 0) 0 1))
-                                                       (+ my-min 3) (- game-hcp min-hcp 1)
+                                                       (+ my-min 3)
+                                                       (- game-hcp min-hcp 1)
                                                        (+ 3 (floor (/ min-hcp 3)))
                                                        (+ game-loosers 1 (floor (/ min-hcp 3)))
-                                                       len))
+                                                       len)
+                                          (suit-biddef (jump-bid suit last-bid (if (= invite-jump 0) 0 1))
+                                                       nil
+                                                       (- game-hcp min-hcp 1)
+                                                       nil
+                                                       nil
+                                                       len)))
                                      ,(suit-biddef `(5 ,suit)
                                                    (- 31 min-hcp 2) (- 30 min-hcp)
                                                    (+ 1 (floor (/ min-hcp 3)))
@@ -541,13 +581,20 @@
       nil
       equal)
 
-(test (choose-bid (str2hand "♣ AJ954 ♦ 76 ♥ Q107 ♠ A1095")
+(test (choose-bid (str2hand "♣ AJ95 ♦ 72 ♥ Q107 ♠ A1095")
                   (further-bid '(and (>= hcp 6) (>= S 4))
                                '(and (>= hcp 12) (<= hcp 22) (>= D 5) (>= S 4))
                                '(2 S)))
       '(3 S)
       equal)
 
+(test (choose-bid (str2hand "♣ AJ9 ♦ K6 ♥ Q1072 ♠ AJ109")
+                  (further-bid '(and balanced (>= hcp 15) (<= hcp 17))
+                               '(and (>= hcp 8) (>= h 4))
+                               '(2 H)))
+      '(3 H)
+      equal)
+      
 ;; Simple bidding state machine (bot vs. empty seats).
 ;; - deal: four hands (N,E,S,W)
 ;; - bids: last bidding sequence
@@ -556,7 +603,7 @@
 (defclass bidding ()
     ((deal :initarg :deal)
      (bids :initform nil)
-     (meanings :initform nil)
+     (meanings :initform (list nil nil))
      (bid-scheme :initform openings)))
 
 ;; Advance to the next call:
@@ -574,27 +621,16 @@
                    (passes bid)
             (when passes
                 (setf deal (roll (- passes) deal))
-                (setf bids (list bid))
-                (setf meanings (list (assoc bid bid-scheme) nil))
-                (setf bid-scheme (cond
-                                   ;; After responder's Stayman (2C/3C), opener replies using stayman-responses.
-                                   ((and (eq (second bid) 'c)
-                                         (assoc '(3 NT) bid-scheme :test #'equal))
-                                    (stayman-responses 1))
-                                   ((and (eq (second bid) 'c)
-                                         (assoc '(4 NT) bid-scheme :test #'equal))
-                                    (stayman-responses 2))
-                                   ;; Strong 2C opening -> 2C-responses.
-                                   ((equal bid '(2 c)) 2c-responses)
-                                   ;; Fresh NT opening -> NT responses for responder.
-                                   ((equal (second bid) 'nt) (nt-responses (first bid)))
-                                   ;; 1-level suit opening -> basic responses.
-                                   ((eq (first bid) 1) (basic-responses bid))
-                                   ;; Otherwise compute continuations.
-                                   (nil (further-bid nil (fourth meanings) bid))))
+                (setf bids (append bids (list bid)))
+                (let ((our-shape (first meanings))
+                      (partner-shape (second meanings))
+                      (bid-meaning (assoc bid bid-scheme)))
+                  (setf bid-scheme (bidding-scheme-for bids meanings))
+                  (setf meanings (list partner-shape
+                                       (combine-shapes our-shape (cdr bid-meaning)))))
                 ;; Assume opponents are silent: alternate between opener and responder only.
                 (setf deal (roll -2 deal))
-                bids))))
+                (list bid)))))
 
 ;; Test: opponents stay silent; partner uses Stayman after 1NT opening and bidding keeps going
 (let ((b (make-instance 'bidding
@@ -604,4 +640,7 @@
                                 (str2hand "W: ♠ 843 ♥ Q982 ♦ 5 ♣ QJ543")))))
   (test (next b) '((1 NT)) equal)
   (test (next b) '((2 C)) equal)
-  (test (next b) '((2 H)) equal))
+  (test (next b) '((2 H)) equal)
+  (test (next b) '((2 NT)) equal)
+  (test (next b) '((3 NT)) equal))
+
