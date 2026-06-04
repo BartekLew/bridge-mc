@@ -249,6 +249,16 @@
 (test (choose-bid (str2hand "♣ AJ753 ♦ A75 ♥ 72 ♠ 1098") (nt-responses 2)) '(3 S) equal)
 (test (choose-bid (str2hand "♣ A10753 ♦ Q75 ♥ 72 ♠ 1098") (nt-responses 2)) '(3 NT) equal)
 
+;; Opener's replies to Stayman (after 1NT -> 2C or 2NT -> 3C):
+;; - Prefer 2H/3H with a 4-card heart suit (even with 4 spades).
+;; - Else bid 2S/3S with a 4-card spade suit.
+;; - Else deny a major with 2D/3D.
+(defun stayman-responses (level)
+  (let ((base-level (+ level 1)))
+    `(((,base-level H) . (>= H 4))
+      ((,base-level S) . (>= S 4))
+      ((,base-level D) . T))))
+
 ;; Responses after a strong 2C opening: distinguish strength/shape and balanced vs unbalanced weak hands.
 ;; It assumes 2D response is an only strong response.
 (defparameter 2C-responses
@@ -566,19 +576,32 @@
                 (setf deal (roll (- passes) deal))
                 (setf bids (list bid))
                 (setf meanings (list (assoc bid bid-scheme) nil))
-                (setf bid-scheme (cond ((equal bid '(2 c)) 2c-responses)
-                                       ((equal (second bid) 'nt) (nt-responses (first bid)))
-                                       ((eq (first bid) 1) (basic-responses bid))
-                                       (nil (further-bid nil (fourth meanings) bid))))
+                (setf bid-scheme (cond
+                                   ;; After responder's Stayman (2C/3C), opener replies using stayman-responses.
+                                   ((and (eq (second bid) 'c)
+                                         (assoc '(3 NT) bid-scheme :test #'equal))
+                                    (stayman-responses 1))
+                                   ((and (eq (second bid) 'c)
+                                         (assoc '(4 NT) bid-scheme :test #'equal))
+                                    (stayman-responses 2))
+                                   ;; Strong 2C opening -> 2C-responses.
+                                   ((equal bid '(2 c)) 2c-responses)
+                                   ;; Fresh NT opening -> NT responses for responder.
+                                   ((equal (second bid) 'nt) (nt-responses (first bid)))
+                                   ;; 1-level suit opening -> basic responses.
+                                   ((eq (first bid) 1) (basic-responses bid))
+                                   ;; Otherwise compute continuations.
+                                   (nil (further-bid nil (fourth meanings) bid))))
                 ;; Assume opponents are silent: alternate between opener and responder only.
                 (setf deal (roll -2 deal))
                 bids))))
 
-;; Test: opponents stay silent; partner uses Stayman after 1NT opening
+;; Test: opponents stay silent; partner uses Stayman after 1NT opening and bidding keeps going
 (let ((b (make-instance 'bidding
                     :deal (list (str2hand "N: ♠ Q1097 ♥ 3 ♦ KJ1063 ♣ K102")
                                 (str2hand "E: ♠ 62 ♥ AJ75 ♦ A942 ♣ 987")
                                 (str2hand "S: ♠ AKJ5 ♥ K1064 ♦ Q87 ♣ A6")
                                 (str2hand "W: ♠ 843 ♥ Q982 ♦ 5 ♣ QJ543")))))
   (test (next b) '((1 NT)) equal)
-  (test (next b) '((2 C)) equal))
+  (test (next b) '((2 C)) equal)
+  (test (next b) '((2 H)) equal))
