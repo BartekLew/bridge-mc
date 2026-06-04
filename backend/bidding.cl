@@ -15,9 +15,36 @@
 
 ; (load "bridge.cl")
 
-; Simple version of Loosing Trick Count evaluation
+; Module: bidding.cl — bridge bidding heuristics (SAYC‑like)
+; Purpose:
+; - For a given hand and bidding history, produce the next call (or a table mapping calls to conditions).
+; - Operates on hand metrics: suit lengths (lens), HCP per suit (power), total losers (loosers).
+; Dependencies:
+; - Utility functions/macros from bridge.cl: str2hand, suits, suit-hcp, suitno, suitsym,
+;   fold, filter, mapcar, curry, lambda-dot, letcar, let-from*, let-from!, with-results, test, etc.
+; Main parts:
+; - assess-hand/balanced?: compute metrics and balancedness.
+; - openings: base opening table (alist -> rule s-expr).
+; - choose-bid: picks the first matching call from a given table (e.g., openings, nt-responses).
+; - nt-responses, 2C-responses, basic-responses: responses after specific openings.
+; - combine-shapes and extractors (min-hcp, max-hcp, longers): working with rules/shapes.
+; - further-bid: generates continuations using known/min ranges and last partner bid.
+; - Class bidding: thin state machine that advances bidding to the first found call.
+;
+; Conventions:
+; - Suits: C, D, H, S, NT; suitsym/suitno convert between symbol and index.
+; - power is HCP per suit; hcp is the sum.
+; - loosers is simplified LTC; lower is better.
+; - “Rules” are plain s-expressions (and/or, comparisons), evaluated by good-opening?.
+; - Bidding tables are alists: (bid . rule).
+; - A bid is a pair (level, suit), e.g., '(1 S), '(2 NT).
+; 
+; Simple version of Losing Trick Count evaluation
 
+;; Simplified LTC for a single suit.
+;; Returns the number of losing tricks in a suit based on presence of A/K/Q (12/11/10) and length.
 (defun suit-loosers (ranks)
+    "Calculate the number of losing tricks in a suit based on its ranks."
     (+ (if (or (find 12 ranks) (= (length ranks) 0)) 0 1)
        (if (or (find 11 ranks) (< (length ranks) 2)) 0 1)
        (if (or (find 10 ranks) (< (length ranks) 3)) 0 1)))
@@ -30,14 +57,21 @@
 (test (suit-loosers '(12 10 9 8 7)) 1 eq)
 (test (suit-loosers '(7)) 1 eq)
 
+;; Hand assessment core:
+;; - Returns (lens, power, losers); optional measure allows injecting a predicate/metric over these three.
+;; - Used by good-opening?, choose-bid and all response tables.
 (defun assess-hand (hand &optional measure)
+    "Assess a hand by calculating its length, high card points (HCP), and losing tricks.
+    Optionally apply a measure function to the results."
     (let ((vals (list (mapcar #'length (suits hand))
                       (mapcar #'suit-hcp (suits hand))
                       (apply #'+ (mapcar #'suit-loosers (suits hand))))))
        (if measure (apply measure vals)
            vals)))
 
+;; Hand balancedness by shape/strength. Used in openings and NT responses.
 (defun balanced? (lens power loosers)
+    "Determine if a hand is balanced based on its length, power, and losing tricks."
     (declare (ignore loosers))
     (and (not (find-if (curry #'> 2) lens))
          (not (find-if (curry #'< 4) (reorder lens '(2 3))))
@@ -57,7 +91,10 @@
 ; List of openings with rules as defined in good-opening?
 ; =======================================================
 
+;; Rule evaluator: substitutes local symbols (C, D, H, S, hcp, power, balanced, losers, etc.)
+;; into the rule s-expression and evals it. Used by choose-bid/test-bid and openings.
 (defun good-opening? (rules lens power loosers)
+    "Check if a hand meets the criteria for a good opening bid based on given rules."
     (eval (sublis `((C . ,(first lens))
                     (D . ,(second lens))
                     (H . ,(third lens))
@@ -73,6 +110,10 @@
                     (balanced . (balanced? ',lens ',power nil)))
                   rules)))
 
+;; Main opening table (SAYC‑like, simplified):
+;; - Keys are calls (level, suit).
+;; - Values are rules in the syntax understood by good-opening?.
+;; - Uses balanced?, hcp, losers and per-suit length/power.
 (defparameter openings 
                  '(((2 C) . (or (> hcp 22)
                                 (and (not balanced)
@@ -143,7 +184,11 @@
 (test (test-bid '(3 H) (str2hand "♣ 85 ♦ K10 ♥ AQJ10932 ♠ 43")) T eq) ; <-- 7 for 3H
 (test (test-bid '(3 H) (str2hand "♣ 85 ♦ 109 ♥ AQJ10932 ♠ 43")) T eq) ; <-- this is fine too
 
+;; Picks the first matching call from a table based on assess-hand.
+;; Returns the call itself (e.g., '(1 S)) or nil if nothing matches.
 (defun choose-bid (hand &optional (openings openings))
+    "Choose the best bid for a given hand based on a list of possible openings.
+    The function evaluates each bid's conditions against the hand's characteristics."
     (let ((measures (assess-hand hand)))
         (car (find-if (lambda-dot (bid meaning)
                         (if (apply #'good-opening? (cons meaning measures)) bid))
@@ -160,9 +205,12 @@
 (test (choose-bid (str2hand "♣ AKQ10952 ♦ Q63 ♥ 9 ♠ K2")) '(1 C) equal)
 (test (choose-bid (str2hand "♣ A95 ♦ 83 ♥ A4 ♠ 1076543")) nil equal)
 
+;; Helper: build (and (>= value min) (<= value max)) form for use in tables.
 (defun range (value range)
    `(and (>= ,value ,(first range)) (<= ,value ,(second range))))
 
+;; Response table after 1NT/2NT opening. level=1 or 2.
+;; Returns alist bid->rule; uses range, balanced and suit lengths.
 (defun nt-responses (level)
     (let ((invite-range (if (= level 1) '(8 9) '(4 5)))
           (game-range (if (= level 1) '(10 15) '(6 10)))
@@ -201,6 +249,8 @@
 (test (choose-bid (str2hand "♣ AJ753 ♦ A75 ♥ 72 ♠ 1098") (nt-responses 2)) '(3 S) equal)
 (test (choose-bid (str2hand "♣ A10753 ♦ Q75 ♥ 72 ♠ 1098") (nt-responses 2)) '(3 NT) equal)
 
+;; Responses after a strong 2C opening: distinguish strength/shape and balanced vs unbalanced weak hands.
+;; It assumes 2D response is an only strong response.
 (defparameter 2C-responses
         '(((2 D) . (>= hcp 6))
           ((2 H) . (and (<= hcp 5) (>= H 4)))
@@ -218,11 +268,14 @@
 (test (choose-bid (str2hand "♣ AJ753 ♦ 875 ♥ 72 ♠ 1098") 2C-responses) '(2 NT) equal)
 (test (choose-bid (str2hand "♣ AJ7532 ♦ 85 ♥ 72 ♠ 1098") 2C-responses) '(3 C) equal)
 
+;; “Fit” predicate with partner’s opened suit; different thresholds for minors/majors.
 (defun fit (suit)
     (cond ((eq suit 'C) '(>= C 5))
           ((eq suit 'D) '(>= D 4))
           (t `(>= ,suit 3))))
 
+;; Responses after a 1-level suit opening (non-NT).
+;; Produces an alist of calls with conditions based on hcp/fit/lack of cheaper suit bids.
 (defun basic-responses (bid)
     (let* ((level (first bid))
            (open-suit (suitno (second bid)))
@@ -260,24 +313,34 @@
 (test (choose-bid (str2hand "♣ 96 ♦ AK7654 ♥ K7 ♠ KQ5") (basic-responses '(1 C))) '(1 D) equal)
 (test (choose-bid (str2hand "♣ 96 ♦ AK765 ♥ K7 ♠ KQ52") (basic-responses '(1 H))) '(1 S) equal)
 
+;; Inference and combination section:
+;; From this point we start extracting and combining constraints inferred from both our and partner's
+;; bidding as well as our hand evaluation. These helpers let us track what partner has revealed, what
+;; we have already shown, and whether there is more informative bidding available in the current context.
+;; Extractors from rule trees: find “less-than/not-greater-than” constraints for a given symbol.
 (defun match-smaller (sym lst)
     (or (matchlist `(< ,sym _) (curry #'+ -1) lst)
         (matchlist `(<= ,sym _) #'id lst)))
         
+;; “Greater-than/not-less-than” constraints for a given symbol.
 (defun match-greater (sym lst)
     (or (matchlist `(> ,sym _) (curry #'+ 1) lst)
         (matchlist `(>= ,sym _) #'id lst)))
         
+;; For suit-length constraints: return (suit, minimal length), preferring stricter bounds.
 (defun match-longer (lst)
     (let ((ans (or (matchlist '(> _ _) (lambda* (suit len) (list suit (+ len 1))) lst)
                    (matchlist '(>= _ _) #'id* lst))))
        (if (find (first ans) '(C D H S))
            ans)))
         
+;; Combine non-nil conditions into (and ...); collapse to a single element when possible.
 (defun and-condition (conds)
     (let ((significant (filter #'id conds)))
         (if (> (length significant) 1) `(and ,@significant) (car significant))))
 
+;; Merge two “shapes” (rules) by adding thresholds for shared measures.
+;; Used to derive joint ranges for continuations.
 (defun combine-shapes (a b)
     (labels ((self (base other)
                 (cond ((not base) nil)
@@ -311,6 +374,7 @@
       '(>= hcp 22)
       equal)
 
+;; Helpers to traverse rule trees (AND/OR or single comparisons).
 (defun find-in-bid (bid-meaning fn)
     (letcar bid-meaning
         (if (find head '(AND OR))
@@ -323,6 +387,9 @@
             (filter #'id (mapcar fn tail))
             (apply fn bid-meaning))))
 
+;; Extract useful metadata from partner rules:
+;; - max-hcp/min-hcp: strength bounds
+;; - longers: minimal suit lengths for candidate contracts
 (defun max-hcp (bid-meaning)
     (find-in-bid bid-meaning (curry #'match-smaller 'hcp))) 
 
@@ -332,31 +399,37 @@
 (defun longers (bid-meaning)
     (filter-bid bid-meaning (curry #'match-longer)))
 
+;; Compute target “game” contract for a given suit.
 (defun game-in (suit)
     (cond ((not suit) '(3 NT))
           ((find suit '(C D)) (list 5 suit))
           (T (list 4 suit))))
 
+;; Compute target “invite” contract for a given suit.
 (defun invite-in (suit)
     (cond ((not suit) '(2 NT))
           ((find suit '(C D)) (list 4 suit))
           (T (list 3 suit))))
 
+;; Bidding arithmetic to measure distance/jump between bids, treating NT as the highest suit (4).
 (defun suitno* (suit)
     (cond ((not suit) 4)
           ((eq suit 'NT) 4)
           (t (suitno suit))))
 
+;; Closest legal call in the given suit relative to the base bid.
 (defun closest-bid (suit base)
     (if (> (suitno suit) (suitno* (second base)))
         (list (first base) suit)
         (list (+ (first base) 1) suit)))
 
+;; Jump by the given number of “levels” relative to the base bid.
 (defun jump-bid (suit base levels)
     (if (> (suitno suit) (suitno* (second base)))
         (list (+ (first base) levels) suit)
         (list (+ (first base) levels 1) suit)))
 
+;; Jump difference between base and a concrete bid (accounts for suit order).
 (defun bid-jump (base bid)
     (let ((level-diff (- (first bid) (first base)))
           (suit-diff (if (> (suitno* (second bid)) (suitno* (second base))) 0 -1)))
@@ -368,6 +441,9 @@
 (test (bid-jump '(1 C) '(3 D)) 2 eq)
 (test (bid-jump '(2 S) '(2 H)) -1 eq)
 
+;; Build (bid . rule) pair for suit continuations: conditions on hcp/losers
+;; and minimum fit vs known partner length.
+;; Note: (- 8 len) — we aim for an 8+ card fit across the partnership.
 (defun suit-biddef (bid min-hcp max-hcp min-losers max-losers len)
     (let ((suit (second bid)))
         (cons bid `(and (or (>= hcp ,min-hcp)
@@ -376,6 +452,14 @@
                         (>= loosers ,min-losers)
                         (>= ,suit ,(- 8 len))))))
 
+;; Further-bid generator:
+;; Input:
+;; - known-shape: our bounds (e.g., '(and (>= hcp 12) ...))
+;; - partner-shape: minimum assumptions inferred from partner’s previous bid
+;; - last-bid: partner’s last call, used for jump calculations
+;; Output:
+;; - alist mapping bids to rules, covering: game, invite, raises, closest fit, natural slams
+;; Internals: uses min-hcp/longers, game-in/invite-in, bid-jump, suit-biddef.
 (defun further-bid (known-shape partner-shape last-bid)
     (let ((my-min (min-hcp known-shape)))
         (with-results ((min-hcp partner-shape)
@@ -454,12 +538,21 @@
       '(3 S)
       equal)
 
+;; Simple bidding state machine (bot vs. empty seats).
+;; - deal: four hands (N,E,S,W)
+;; - bids: last bidding sequence
+;; - meanings: interpretation of the last call
+;; - bid-scheme: current table (openings/responses/further-bid)
 (defclass bidding ()
     ((deal :initarg deal)
      (bids :initform nil)
      (meanings :initform nil)
      (bid-scheme :initform openings)))
 
+;; Advance to the next call:
+;; - Scan (N,E,S,W) for the first hand matching the current scheme.
+;; - Rotate the deal (roll), update history and meanings.
+;; - Choose the next response scheme based on the call (2C/NT/1x/else->further-bid).
 (defmethod next ((this bidding))
     (with-slots (deal bids meanings bid-scheme) this
         (let-from! (fold (lambda (acc val)
@@ -479,6 +572,7 @@
                                        (nil (further-bid nil (fourth meanings) bid))))
                 bids))))
 
+;; Example usage (demo):
 (defparameter b (make-instance 'bidding
                     :deal (list (str2hand "N: ♠ Q1097 ♥ 3 ♦ KJ1063 ♣ K102")
                                 (str2hand "E: ♠ 62 ♥ AJ75 ♦ A942 ♣ 987")
