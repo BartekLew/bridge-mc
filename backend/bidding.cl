@@ -544,7 +544,7 @@
 ;; - meanings: interpretation of the last call
 ;; - bid-scheme: current table (openings/responses/further-bid)
 (defclass bidding ()
-    ((deal :initarg deal)
+    ((deal :initarg :deal)
      (bids :initform nil)
      (meanings :initform nil)
      (bid-scheme :initform openings)))
@@ -570,12 +570,15 @@
                                        ((equal (second bid) 'nt) (nt-responses (first bid)))
                                        ((eq (first bid) 1) (basic-responses bid))
                                        (nil (further-bid nil (fourth meanings) bid))))
+                ;; Assume opponents are silent: alternate between opener and responder only.
+                (setf deal (roll -2 deal))
                 bids))))
 
-;; Example usage (demo):
-(defparameter b (make-instance 'bidding
+;; Test: opponents stay silent; partner uses Stayman after 1NT opening
+(let ((b (make-instance 'bidding
                     :deal (list (str2hand "N: ♠ Q1097 ♥ 3 ♦ KJ1063 ♣ K102")
                                 (str2hand "E: ♠ 62 ♥ AJ75 ♦ A942 ♣ 987")
                                 (str2hand "S: ♠ AKJ5 ♥ K1064 ♦ Q87 ♣ A6")
-                                (str2hand "W: ♠ 843 ♥ Q982 ♦ 5 ♣ QJ543"))))
-(next b)
+                                (str2hand "W: ♠ 843 ♥ Q982 ♦ 5 ♣ QJ543")))))
+  (test (next b) '((1 NT)) equal)
+  (test (next b) '((2 C)) equal))
