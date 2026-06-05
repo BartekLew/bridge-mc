@@ -27,7 +27,7 @@
 ; - openings: base opening table (alist -> rule s-expr).
 ; - choose-bid: picks the first matching call from a given table (e.g., openings, nt-responses).
 ; - nt-responses, 2C-responses, basic-responses: responses after specific openings.
-; - combine-shapes and extractors (min-hcp, max-hcp, longers): working with rules/shapes.
+; - merge-shapes and extractors (min-hcp, max-hcp, longers): working with rules/shapes.
 ; - further-bid: generates continuations using known/min ranges and last partner bid.
 ; - Class bidding: thin state machine that advances bidding to the first found call.
 ;
@@ -259,19 +259,6 @@
       ((,base-level S) . (>= S 4))
       ((,base-level D) . (and (< H 4) (< S 4))))))
 
-;; Bidding scheme selection based on bidding sequence (history-aware).
-(defun bidding-scheme-for (bids meanings)
-    (cond ((equal bids '((1 NT))) (nt-responses 1))
-          ((equal bids '((2 NT))) (nt-responses 2))
-          ((and (= (length bids) 1) (eq (seektree '(0 0) bids) 1))
-              (basic-responses (first bids)))
-          ((equal bids '((2 C))) 2c-responses)
-          ((equal bids '((1 NT) (2 C)))
-              (stayman-responses 1))
-          ((equal bids '((2 NT) (2 C)))
-              (stayman-responses 2))
-          (t (further-bid (first meanings) (second meanings) (car (last bids))))))
-
 ;; Responder's rebids after opener answers 2H/3H to Stayman (1NT/2NT context).
 ;; Covers:
 ;; - Fit in hearts: invite (3H) with 8-9 HCP, bid game (4H) with 10-15 HCP.
@@ -369,50 +356,97 @@
         
 ;; For suit-length constraints: return (suit, minimal length), preferring stricter bounds.
 (defun match-longer (lst)
-    (let ((ans (or (matchlist '(> _ _) (lambda* (suit len) (list suit (+ len 1))) lst)
+    (let ((ans (or (matchlist '(> _ _) (lambda (suit len) (list suit (+ len 1))) lst)
                    (matchlist '(>= _ _) #'id* lst))))
        (if (find (first ans) '(C D H S))
            ans)))
         
 ;; Combine non-nil conditions into (and ...); collapse to a single element when possible.
 (defun and-condition (conds)
-    (let ((significant (filter #'id conds)))
+    (let ((significant (filter #'listp conds)))
         (if (> (length significant) 1) `(and ,@significant) (car significant))))
 
-;; Merge two “shapes” (rules) by adding thresholds for shared measures.
-;; Used to derive joint ranges for continuations.
-(defun combine-shapes (a b)
-    (labels ((self (base other)
-                (cond ((not base) nil)
-                      ((eq (first base) 'and)
-                          (if (eq (first other) 'and)
-                              (and-condition
-                                      (mapcar (lambda* (op measure val)
-                                                 (let* ((extractor (if (find op '(> >=)) #'match-greater
-                                                                                    #'match-smaller))
-                                                        (otherval (find-if #'id
-                                                                        (mapcar (curry extractor measure)
-                                                                                (cdr other)))))
-                                                    (if otherval `(,op ,measure ,(+ val otherval)))))
-                                              (filter #'listp (cdr base))))
-                              (self base `(and ,other))))
-                      (t (self `(and ,base) other)))))
-         (if (not a) b
-             (self a b))))
+;; Merge two consecutive shapes (rules) made by the same player.
+;; Keeps all constraints present in either shape; for the same measure chooses the more restrictive:
+;; - for lower bounds (>/>=) pick the higher threshold; if equal, '>' is stricter than '>='
+;; - for upper bounds (</<=) pick the lower threshold; if equal, '<' is stricter than '<='
+(defun merge-shapes (a b)
+    (labels ((clauses (shape)
+                (cond ((not shape) nil)
+                      ((and (listp shape) (eq (first shape) 'and)) (cdr shape))
+                      (t (list shape))))
+             (lower-op? (op) (or (eq op '>=) (eq op '>)))
+             (upper-op? (op) (or (eq op '<=) (eq op '<)))
+             (pick-lower (x y)
+                (cond ((not x) y)
+                      ((not y) x)
+                      (t (destructuring-bind (op1 var1 val1) x
+                           (declare (ignore var1))
+                           (destructuring-bind (op2 var2 val2) y
+                             (declare (ignore var2))
+                             (cond ((> val1 val2) x)
+                                   ((< val1 val2) y)
+                                   (t (if (and (eq op1 '>) (not (eq op2 '>))) x
+                                          (if (and (eq op2 '>) (not (eq op1 '>))) y
+                                              x)))))))))
+             (pick-upper (x y)
+                (cond ((not x) y)
+                      ((not y) x)
+                      (t (destructuring-bind (op1 var1 val1) x
+                           (declare (ignore var1))
+                           (destructuring-bind (op2 var2 val2) y
+                             (declare (ignore var2))
+                             (cond ((< val1 val2) x)
+                                   ((> val1 val2) y)
+                                   (t (if (and (eq op1 '<) (not (eq op2 '<))) x
+                                          (if (and (eq op2 '<) (not (eq op1 '<))) y
+                                              x))))))))))
+        (let ((lowers nil) (uppers nil) (others nil) (order nil))
+            (dolist (cl (append (clauses a) (clauses b)))
+                (if (and (listp cl) (= (length cl) 3) (symbolp (first cl)))
+                    (let ((op (first cl)) (var (second cl)) (val (third cl)))
+                        (declare (ignore val))
+                        (cond ((lower-op? op)
+                               (let ((cell (assoc var lowers)))
+                                 (if cell
+                                     (setf (cdr cell) (pick-lower (cdr cell) cl))
+                                     (progn (push (cons var cl) lowers)
+                                            (pushnew var order :test #'eq)))))
+                              ((upper-op? op)
+                               (let ((cell (assoc var uppers)))
+                                 (if cell
+                                     (setf (cdr cell) (pick-upper (cdr cell) cl))
+                                     (progn (push (cons var cl) uppers)
+                                            (pushnew var order :test #'eq)))))
+                              (t (unless (find cl others :test #'equal)
+                                   (setf others (append others (list cl)))))))
+                    (unless (find cl others :test #'equal)
+                        (setf others (append others (list cl))))))
+            (let* ((vars (reverse order))
+                   (bounds (apply #'append
+                                  (mapcar (lambda (v)
+                                            (let ((lb (cdr (assoc v lowers)))
+                                                  (ub (cdr (assoc v uppers))))
+                                                (remove nil (list lb ub))))
+                                          vars)))
+                   (merged (append others bounds)))
+              (cond ((null merged) nil)
+                    ((= (length merged) 1) (car merged))
+                    (t `(and ,@merged)))))))
 
-(test (combine-shapes '(and (>= hcp 12) (<= hcp 22) (>= S 5))
-                      '(and (>= hcp 10) (>= H 5)))
-      '(>= hcp 22) 
+(test (merge-shapes '(and (>= hcp 12) (<= hcp 22) (>= S 5))
+                    '(and (>= hcp 10) (>= H 5)))
+      '(and (>= hcp 12) (<= hcp 22) (>= S 5) (>= H 5))
       equal)
 
-(test (combine-shapes '(and (>= hcp 12) (<= hcp 22) (>= S 5))
-                      '(and (>= hcp 6) (<= hcp 10) (>= S 3)))
-      '(and (>= hcp 18) (<= hcp 32) (>= S 8))
+(test (merge-shapes '(and (>= hcp 12) (<= hcp 22) (>= S 5))
+                    '(and (>= hcp 15) (<= hcp 17) (>= S 3)))
+      '(and (>= hcp 15) (<= hcp 17) (>= S 5))
       equal)
 
-(test (combine-shapes '(and (>= hcp 12) (<= hcp 22) (>= S 5))
-                      '(and (>= hcp 10) (or (>= hcp 15) (<= S 2))))
-      '(>= hcp 22)
+(test (merge-shapes '(and (>= hcp 12))
+                    '(and (> hcp 12) (<= S 5)))
+      '(and (> hcp 12) (<= S 5))
       equal)
 
 ;; Helpers to traverse rule trees (AND/OR or single comparisons).
@@ -516,7 +550,7 @@
                                                   (+ 2 (floor (/ min-hcp 3)))
                                                   (+ game-loosers (floor (/ min-hcp 3)))
                                                   len)
-                                    ,(if (> invite-jump 1)
+                                    ,(if (>= invite-jump 1)
                                          (suit-biddef (invite-in suit)
                                                       (- game-hcp min-hcp 2) (- game-hcp min-hcp)
                                                       (+ 3 (floor (/ min-hcp 3)))
@@ -524,13 +558,13 @@
                                                       len))
                                      ,(if (>= invite-jump 0)
                                         (if max-hcp
-                                          (suit-biddef (jump-bid suit last-bid (if (= invite-jump 0) 0 1))
+                                          (suit-biddef (jump-bid suit last-bid 0)
                                                        (+ my-min 3)
                                                        (- game-hcp min-hcp 1)
                                                        (+ 3 (floor (/ min-hcp 3)))
                                                        (+ game-loosers 1 (floor (/ min-hcp 3)))
                                                        len)
-                                          (suit-biddef (jump-bid suit last-bid (if (= invite-jump 0) 0 1))
+                                          (suit-biddef (jump-bid suit last-bid 0)
                                                        nil
                                                        (- game-hcp min-hcp 1)
                                                        nil
@@ -544,7 +578,30 @@
                                      ,@(if (or (not (eq suit (second last-bid)))
                                                (= (first last-bid) 1))
                                          `((,(closest-bid suit last-bid) . (>= ,suit ,(- 8 len)))))
-                                                            ))))))))
+                                                            ))))
+              ;; NT continuations:
+              ;; - 6NT: slam (~33 total HCP)
+              ;; - 4NT: slam invite (31-32 total HCP)
+              ;; - 3NT: game (25 total HCP)
+              ;; - 2NT: invite when there is space or when not forced
+              ;; - closest NT: nearest NT call; nonforced shows ~+3 HCP, forced allows +0..+2 HCP
+              ,@(let* ((base-suit (second last-bid))
+                       (nt-level (if (< (suitno* base-suit) 4) (first last-bid) (+ (first last-bid) 1))))
+                  (append
+                   (list `((6 NT) . (>= hcp ,(- 33 min-hcp))))
+                   (list `((4 NT) . (and (>= hcp ,(- 31 min-hcp))
+                                         (<= hcp ,(- 32 min-hcp)))))
+                   (list `((3 NT) . (>= hcp ,(- 25 min-hcp))))
+                   (if (or (> (bid-jump last-bid '(2 NT)) 0) max-hcp)
+                       (list `((2 NT) . (and (>= hcp ,(- 25 min-hcp 2))
+                                             (<= hcp ,(- 25 min-hcp)))))
+                       '())
+                   (list (if max-hcp
+                             `((,nt-level NT) . (and (>= hcp ,(+ my-min 3))
+                                                     (<= hcp ,(- 25 min-hcp 1))))
+                             `((,nt-level NT) . (and (>= hcp ,my-min)
+                                                     (<= hcp ,(+ my-min 2))))))))
+              ))))
 
 (test (choose-bid (str2hand "♣ 9 ♦ AK7654 ♥ K7 ♠ KQ105")
                   (further-bid '(and (>= hcp 12) (<= hcp 22) (>= D 5))
@@ -555,13 +612,13 @@
 
 (test (choose-bid (str2hand "♣ A ♦ AK7654 ♥ K7 ♠ KQ105")
                   (further-bid '(and (>= hcp 12) (<= hcp 22) (>= D 5))
-                               '(and (>= hcp 6) (>= S 4))
+                               '(and (> hcp 5) (>= S 4))
                                '(1 S)))
       '(5 S)
       equal)
       
-(test (choose-bid (str2hand "♣ 954 ♦ AK106 ♥ QJ ♠ KQ105")
-                  (further-bid '(and (>= hcp 12) (<= hcp 22) (>= D 5))
+(test (choose-bid (str2hand "♣ Q54 ♦ AK106 ♥ QJ ♠ KQ105")
+                  (further-bid '(and (>= hcp 12) (<= hcp 22) (>= D 4))
                                '(and (>= hcp 6) (>= S 4))
                                '(1 S)))
       '(3 S)
@@ -595,6 +652,19 @@
       '(3 H)
       equal)
       
+;; Bidding scheme selection based on bidding sequence (history-aware).
+(defun bidding-scheme-for (bids meanings)
+    (cond ((equal bids '((1 NT))) (nt-responses 1))
+          ((equal bids '((2 NT))) (nt-responses 2))
+          ((and (= (length bids) 1) (eq (seektree '(0 0) bids) 1))
+              (basic-responses (first bids)))
+          ((equal bids '((2 C))) 2c-responses)
+          ((equal bids '((1 NT) (2 C)))
+              (stayman-responses 1))
+          ((equal bids '((2 NT) (2 C)))
+              (stayman-responses 2))
+          (t (further-bid (first meanings) (second meanings) (car (last bids))))))
+
 ;; Simple bidding state machine (bot vs. empty seats).
 ;; - deal: four hands (N,E,S,W)
 ;; - bids: last bidding sequence
@@ -625,9 +695,9 @@
                 (let ((our-shape (first meanings))
                       (partner-shape (second meanings))
                       (bid-meaning (assoc bid bid-scheme)))
-                  (setf bid-scheme (bidding-scheme-for bids meanings))
                   (setf meanings (list partner-shape
-                                       (combine-shapes our-shape (cdr bid-meaning)))))
+                                       (merge-shapes our-shape (cdr bid-meaning))))
+                  (setf bid-scheme (bidding-scheme-for bids meanings)))
                 ;; Assume opponents are silent: alternate between opener and responder only.
                 (setf deal (roll -2 deal))
                 (list bid)))))

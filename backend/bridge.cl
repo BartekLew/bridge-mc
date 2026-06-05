@@ -519,7 +519,7 @@
 
 (defun suitno (suitsym) 
     (if (symbolp suitsym)
-        (position suitsym '(c d h s))
+        (position suitsym '(c d h s nt))
         suitsym))
 
 (defun suit-uc (suit)
