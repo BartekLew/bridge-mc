@@ -373,7 +373,9 @@
 (defun merge-shapes (a b)
     (labels ((clauses (shape)
                 (cond ((not shape) nil)
-                      ((and (listp shape) (eq (first shape) 'and)) (cdr shape))
+                      ((and (listp shape) (eq (first shape) 'and)) 
+                            (filter (f** #'first (curry #'eq 'or) #'not)
+                                (filter #'listp (cdr shape))))
                       (t (list shape))))
              (lower-op? (op) (or (eq op '>=) (eq op '>)))
              (upper-op? (op) (or (eq op '<=) (eq op '<)))
@@ -449,12 +451,18 @@
       '(and (> hcp 12) (<= S 5))
       equal)
 
+;; Drop all ors from combined shapes. They would be misleading for further-bid.
+(test (merge-shapes '(and (>= hcp 8) (or (>= h 4) (>= s 4)))
+                    '(>= s 4))
+      '(and (>= hcp 8) (>= s 4))
+      equal)
+
 ;; Helpers to traverse rule trees (AND/OR or single comparisons).
 (defun find-in-bid (bid-meaning fn)
     (letcar bid-meaning
         (if (find head '(AND OR))
             (find-if #'id (mapcar fn tail))
-            (apply fn bid-meaning))))
+            (funcall fn bid-meaning))))
 
 (defun filter-bid (bid-meaning fn)
     (letcar bid-meaning
@@ -540,7 +548,9 @@
         (with-results ((min-hcp partner-shape)
                        (max-hcp partner-shape)
                        (longers partner-shape))
-            `(,@(loop for longer in longers
+            (filter (f* #'first (curry #'bid-jump last-bid) (curry #'<= 0)) 
+               (append
+                  (loop for longer in longers
                       append (let-from* longer (suit len)
                                 (let ((game-hcp (if (find suit '(C D)) 27 25))
                                       (game-loosers (if (find suit '(C D)) 2 3))
@@ -585,7 +595,7 @@
               ;; - 3NT: game (25 total HCP)
               ;; - 2NT: invite when there is space or when not forced
               ;; - closest NT: nearest NT call; nonforced shows ~+3 HCP, forced allows +0..+2 HCP
-              ,@(let* ((base-suit (second last-bid))
+               (let* ((base-suit (second last-bid))
                        (nt-level (if (< (suitno* base-suit) 4) (first last-bid) (+ (first last-bid) 1))))
                   (append
                    (list `((6 NT) . (>= hcp ,(- 33 min-hcp))))
@@ -601,7 +611,7 @@
                                                      (<= hcp ,(- 25 min-hcp 1))))
                              `((,nt-level NT) . (and (>= hcp ,my-min)
                                                      (<= hcp ,(+ my-min 2))))))))
-              ))))
+              )))))
 
 (test (choose-bid (str2hand "♣ 9 ♦ AK7654 ♥ K7 ♠ KQ105")
                   (further-bid '(and (>= hcp 12) (<= hcp 22) (>= D 5))
@@ -652,6 +662,14 @@
       '(3 H)
       equal)
       
+;; Test that further bid choses only from biddable answers
+(test (choose-bid (str2hand "♣ AJ9 ♦ K86 ♥ Q107 ♠ AJ109")
+                  (further-bid '(and balanced (>= hcp 15) (<= hcp 17))
+                               '(and (>= hcp 8) (<= hcp 14) (>= h 4))
+                               '(3 NT)))
+      nil
+      equal)
+
 ;; Bidding scheme selection based on bidding sequence (history-aware).
 (defun bidding-scheme-for (bids meanings)
     (cond ((equal bids '((1 NT))) (nt-responses 1))
@@ -687,7 +705,7 @@
                               (let ((bid (choose-bid (nth val deal) bid-scheme)))
                                 (if bid (list val bid)))))
                          nil
-                         '(0 1 2 3))
+                         (if bids '(0) '(0 1 2 3)))
                    (passes bid)
             (when passes
                 (setf deal (roll (- passes) deal))
@@ -712,5 +730,6 @@
   (test (next b) '((2 C)) equal)
   (test (next b) '((2 H)) equal)
   (test (next b) '((2 NT)) equal)
-  (test (next b) '((3 NT)) equal))
+  (test (next b) '((3 NT)) equal)
+  (test (next b) nil eq))
 
