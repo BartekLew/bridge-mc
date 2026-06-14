@@ -161,6 +161,14 @@
         (letcar lst
             (filter pred tail (if (funcall pred head) (cons head acc) acc)))))
 
+(defun build-or (&rest forms)
+    (let ((nonnull (filter #'id forms)))
+        (if (> (length nonnull) 1) (cons 'or nonnull) (car nonnull))))
+
+(defun build-and (&rest forms)
+    (let ((nonnull (filter #'id forms)))
+        (if (> (length nonnull) 1) (cons 'and nonnull) (car nonnull))))
+
 (defun curry (fun &rest base-args)
     (lambda (&rest args)
         (apply fun (append base-args args))))
@@ -186,11 +194,15 @@
 (test (filter (curry #'< 3) '(1 2 3 4 5 4 3 2 1)) '(4 5 4) equal)
 
 (defun matchlist (pattern mapper list &optional args)
-    (cond ((not pattern) (apply mapper (reverse args)))
+    (cond ((not pattern) (apply mapper args))
           ((not (listp list)) nil)
           ((not list) nil)
           ((eq (car pattern) '_)
-            (matchlist (cdr pattern) mapper (cdr list) (cons (car list) args)))
+            (matchlist (cdr pattern) mapper (cdr list) (append args (list (car list)))))
+          ((listp (car pattern))
+              (let-from! (matchlist (car pattern) (lambda (&rest args) (list T args)) (car list))
+                    (success subargs)
+                    (if success (matchlist (cdr pattern) mapper (cdr list) (append args subargs)))))
           (t (if (equal (car pattern) (car list))
                  (matchlist (cdr pattern) mapper (cdr list) args)))))
         
@@ -199,6 +211,10 @@
 
 (test (matchlist '(>= S _) #'id '(>= S 5))
       5 eq)
+
+(test (matchlist '(or (>= hcp _) (<= losers _)) #'id* '(or (>= hcp 5) (<= losers 3)))
+      '(5 3)
+      equal)
 
 (defun reorder (lst indexes)
     (loop for i in indexes

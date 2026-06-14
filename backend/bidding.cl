@@ -110,33 +110,36 @@
                     (balanced . (balanced? ',lens ',power nil)))
                   rules)))
 
+(defvar balanced (append (loop for s in '(c d h s)
+                               collect `(>= ,s 2))
+                         (loop for s in '(c d)
+                               collect `(<= ,s 5))
+                         (loop for s in '(h s)
+                               collect `(<= ,s 4))))
+                   
 ;; Main opening table (SAYC‑like, simplified):
 ;; - Keys are calls (level, suit).
 ;; - Values are rules in the syntax understood by good-opening?.
 ;; - Uses balanced?, hcp, losers and per-suit length/power.
 (defparameter openings 
-                 '(((2 C) . (or (> hcp 22)
+                 `(((2 C) . (or (> hcp 22)
                                 (and (not balanced)
                                      (cond ((find-if (curry #'< 4) (subseq lens 2 4)) (<= losers 4))
                                            ((find-if (curry #'< 4) (subseq lens 0 2)) (<= losers 3))))))
-                   ((2 NT) . (and balanced (not (find-if (curry #'> 3) power))
-                                  (> hcp 18)))
-                   ((1 NT) . (and balanced (> hcp 14) (< hcp 18)))
+                   ((2 NT) . (and ,@balanced (> hcp 18) (<= hcp 22)))
+                   ((1 NT) . (and ,@balanced (> hcp 14) (< hcp 18)))
                    ((1 S) . (and (or (< losers 6) (> hcp 11))
                                  (> losers 4) (< hcp 23)
-                                 (>= S 5)
-                                 (not (and (> hcp 16) (find-if (curry #'< 4) (subseq lens 0 3))))))
+                                 (>= S 5)))
                    ((1 H) . (and (or (< losers 6) (> hcp 11))
                                  (> losers 4) (< hcp 23)
-                                 (>= H 5)
-                                 (not (and (> hcp 16) (find-if (curry #'< 4) (subseq lens 0 2))))))
+                                 (>= H 5) (< S 5)))
                    ((1 D) . (and (or (< losers 6) (> hcp 11))
                                  (> losers 3) (< hcp 23)
-                                 (>= D 4) (>= D C)
-                                 (not (and (> hcp 16) (>= C 5)))))
+                                 (>= D 4) (>= D C) (< H 5) (< S 5)))
                    ((1 C) . (and (or (< losers 6) (> hcp 11))
                                  (> losers 3) (< hcp 23)
-                                 (>= C 3)))
+                                 (>= C 3) (< H 5) (< S 5)))
                    ((2 D) . (and (> hcp 5) (>= Dpower 5) (or (> losers 5) (< hcp 11)) (= D 6)))
                    ((2 H) . (and (> hcp 5) (>= Hpower 5) (or (> losers 5) (< hcp 11)) (= H 6)))
                    ((2 S) . (and (> hcp 5) (>= Spower 5) (or (> losers 5) (< hcp 11)) (= S 6)))
@@ -158,15 +161,10 @@
 (test (test-bid '(2 C) (str2hand "♣ AKQJ ♦ AQ83 ♥ K103 ♠ K43")) nil eq)
 (test (test-bid '(2 NT) (str2hand "♣ AKQJ ♦ AQ83 ♥ K103 ♠ K43")) T eq)
 (test (test-bid '(2 NT) (str2hand "♣ AQJ5 ♦ AQ83 ♥ K103 ♠ K43")) T eq)
-(test (test-bid '(2 NT) (str2hand "♣ AQJ5 ♦ AKQ8 ♥ 1093 ♠ K43")) nil eq) ; <- missing hearts
-(test (test-bid '(1 C) (str2hand "♣ AQJ5 ♦ AKQ8 ♥ 1093 ♠ K43")) T eq)    ; <- so 1C
-(test (test-bid '(1 D) (str2hand "♣ AQJ5 ♦ AKQ8 ♥ 1093 ♠ K43")) T eq)    ; <- or 1D
 (test (test-bid '(1 NT) (str2hand "♣ AQJ5 ♦ AQ108 ♥ 1093 ♠ K43")) T eq)
 
 (test (test-bid '(1 S) (str2hand "♣ 852 ♦ AQ ♥ AQJ3 ♠ A10943")) T eq)
 (test (test-bid '(1 S) (str2hand "♣ 852 ♦ A10 ♥ AQJ103 ♠ A10943")) T eq)
-(test (test-bid '(1 S) (str2hand "♣ 852 ♦ AQ ♥ AK1053 ♠ A10943")) NIL eq) ; eligible for reverse
-(test (test-bid '(1 H) (str2hand "♣ 852 ♦ AQ ♥ AK1053 ♠ A10943")) T eq) ; <- so 1H is ok
 (test (test-bid '(1 H) (str2hand "♣ 852 ♦ AQ ♥ AQJ83 ♠ A1043")) T eq)
 (test (test-bid '(1 H) (str2hand "♣ 8 ♦ AQ ♥ AQJ83 ♠ AK1043")) nil eq) ; eligible for 2C
 (test (test-bid '(2 C) (str2hand "♣ 8 ♦ AQ ♥ AQJ83 ♠ AK1043")) T eq) ; <-- so 2C
@@ -326,7 +324,7 @@
                `(((2 ,(suitsym open-suit)) . (and (>= hcp 6) (<= hcp 9) ,fit 
                                                   ,@no-biddable-4))
                  ((3 ,(suitsym open-suit)) . (and (>= hcp 10) (<= hcp 12) ,fit 
-                                                  ,@no-biddable-4 ,no-lower-5)))
+                                                  ,@no-biddable-4 ,@no-lower-5)))
                (if (>= open-suit 2)
                    `(((4 ,(suitsym open-suit)) . (and (>= hcp 13) (<= hcp 15) ,fit))))
                (loop for suit-no in (filter (curry #'> open-suit) '(1 2 3))
@@ -371,11 +369,31 @@
 ;; - for lower bounds (>/>=) pick the higher threshold; if equal, '>' is stricter than '>='
 ;; - for upper bounds (</<=) pick the lower threshold; if equal, '<' is stricter than '<='
 (defun merge-shapes (a b)
-    (labels ((clauses (shape)
+    (labels ((extract-or-hcp-losers (form)
+                (when (and (listp form) (eq (first form) 'or))
+                  (let* ((subs (cdr form))
+                         (hcp-lb (find-if (lambda (x)
+                                            (and (listp x) (= (length x) 3)
+                                                 (or (eq (first x) '>=) (eq (first x) '>))
+                                                 (eq (second x) 'hcp)))
+                                          subs))
+                         (losers-ub (find-if (lambda (x)
+                                               (and (listp x) (= (length x) 3)
+                                                    (or (eq (first x) '<=) (eq (first x) '<))
+                                                    (eq (second x) 'losers)))
+                                             subs)))
+                    (remove nil (list hcp-lb losers-ub)))))
+             (clauses (shape)
                 (cond ((not shape) nil)
-                      ((and (listp shape) (eq (first shape) 'and)) 
-                            (filter (f** #'first (curry #'eq 'or) #'not)
-                                (filter #'listp (cdr shape))))
+                      ((and (listp shape) (eq (first shape) 'and))
+                       (let ((acc nil))
+                         (dolist (sub (filter #'listp (cdr shape)) (reverse acc))
+                           (if (and (listp sub) (eq (first sub) 'or))
+                               (let ((pair (extract-or-hcp-losers sub)))
+                                 (when pair (setf acc (append pair acc))))
+                               (push sub acc)))))
+                      ((and (listp shape) (eq (first shape) 'or))
+                       (extract-or-hcp-losers shape))
                       (t (list shape))))
              (lower-op? (op) (or (eq op '>=) (eq op '>)))
              (upper-op? (op) (or (eq op '<=) (eq op '<)))
@@ -425,13 +443,23 @@
                     (unless (find cl others :test #'equal)
                         (setf others (append others (list cl))))))
             (let* ((vars (reverse order))
+                   (lb-hcp (cdr (assoc 'hcp lowers)))
+                   (ub-hcp (cdr (assoc 'hcp uppers)))
+                   (lb-losers (cdr (assoc 'losers lowers)))
+                   (ub-losers (cdr (assoc 'losers uppers)))
+                   (special-or (build-or lb-hcp ub-losers))
                    (bounds (apply #'append
                                   (mapcar (lambda (v)
-                                            (let ((lb (cdr (assoc v lowers)))
-                                                  (ub (cdr (assoc v uppers))))
-                                                (remove nil (list lb ub))))
+                                            (cond ((eq v 'hcp)
+                                                   (remove nil (list ub-hcp)))
+                                                  ((eq v 'losers)
+                                                   (remove nil (list lb-losers)))
+                                                  (t
+                                                   (let ((lb (cdr (assoc v lowers)))
+                                                         (ub (cdr (assoc v uppers))))
+                                                     (remove nil (list lb ub))))))
                                           vars)))
-                   (merged (append others bounds)))
+                   (merged (append others (remove nil (list special-or)) bounds)))
               (cond ((null merged) nil)
                     ((= (length merged) 1) (car merged))
                     (t `(and ,@merged)))))))
@@ -457,12 +485,41 @@
       '(and (>= hcp 8) (>= s 4))
       equal)
 
+;; Preserve special OR for (>= hcp _) or (<= losers _), even when mixed with other constraints.
+(test (merge-shapes '(or (>= hcp 12) (<= losers 7))
+                    '(>= S 4))
+      '(and (or (>= hcp 12) (<= losers 7)) (>= S 4))
+      equal)
+
+;; Prefer stricter bounds when both shapes contribute special-OR components, with >/< handled too.
+(test (merge-shapes '(or (> hcp 14) (< losers 6))
+                    '(and (>= hcp 12) (<= losers 8)))
+      '(or (> hcp 14) (< losers 6))
+      equal)
+
+;; If the two clauses come from separate shapes, the result still groups them under OR.
+(test (merge-shapes '(>= hcp 12)
+                    '(<= losers 7))
+      '(or (>= hcp 12) (<= losers 7))
+      equal)
+
+;; > and < variants should also be grouped and preserved.
+(test (merge-shapes '(> hcp 11)
+                    '(< losers 8))
+      '(or (> hcp 11) (< losers 8))
+      equal)
+
 ;; Helpers to traverse rule trees (AND/OR or single comparisons).
 (defun find-in-bid (bid-meaning fn)
     (letcar bid-meaning
         (if (find head '(AND OR))
             (find-if #'id (mapcar fn tail))
             (funcall fn bid-meaning))))
+
+(test (find-in-bid '(and (or (>= hcp 10) (<= losers 8))) 
+                   (curry #'matchlist '(or (>= hcp _) (<= losers _)) #'id*))
+      '(10 8)
+      equal)
 
 (defun filter-bid (bid-meaning fn)
     (letcar bid-meaning
@@ -477,7 +534,18 @@
     (find-in-bid bid-meaning (curry #'match-smaller 'hcp))) 
 
 (defun min-hcp (bid-meaning)
-    (find-in-bid bid-meaning (curry #'match-greater 'hcp)))
+    (find-in-bid bid-meaning (orf (curry #'match-greater 'hcp)
+                                  (curry #'matchlist '(or (>= hcp _) (_ losers _))
+                                                     (lambda (hcp &rest _) 
+                                                        (declare (ignore _)) 
+                                                        hcp))
+                                  (curry #'matchlist '(or (> hcp _) (_ losers _))
+                                                     (lambda (hcp &rest _) 
+                                                        (declare (ignore _)) 
+                                                        (+ hcp 1))))))
+
+(test (min-hcp '(and (or (>= hcp 18) (< losers 6)) (> c 5)))
+      18 eq)
 
 (defun longers (bid-meaning)
     (filter-bid bid-meaning (curry #'match-longer)))
@@ -524,13 +592,19 @@
 (test (bid-jump '(1 C) '(3 D)) 2 eq)
 (test (bid-jump '(2 S) '(2 H)) -1 eq)
 
-(defun build-or (&rest forms)
-    (let ((nonnull (filter #'id forms)))
-        (if (> (length nonnull) 1) (cons 'or nonnull) (car nonnull))))
+(defun propagate-from-previous (extract set lst)
+    "extract: function f(e) -> v, set: function g(v, e) -> e', lst: a list
+     returns a list with values extracted from previous elements are set into next"
+    (labels ((walk (prev rest &optional acc)
+                (if (not rest) (reverse acc)
+                    (letcar rest
+                        (walk head tail (cons (funcall set (funcall extract prev) head)
+                                              acc))))))
+        (if lst (cons (car lst) (walk (car lst) (cdr lst))))))
 
-(defun build-and (&rest forms)
-    (let ((nonnull (filter #'id forms)))
-        (if (> (length nonnull) 1) (cons 'and nonnull) (car nonnull))))
+(test (propagate-from-previous #'id #'+ '(1 2 3 4 5))
+      '(1 3 5 7 9)
+      equal)
 
 ;; Build (bid . rule) pair for suit continuations: conditions on hcp/losers
 ;; and minimum fit vs known partner length.
@@ -539,14 +613,14 @@
     (let ((suit (second bid)))
         (cons bid (build-and (build-or (if min-hcp `(>= hcp ,min-hcp))
                                        (if (and len max-losers) `(<= losers ,max-losers)))
-                             (build-or (if max-hcp `(<= hcp ,max-hcp))
-                                       (if (and len min-losers) `(>= losers ,min-losers)))
+                             (if max-hcp `(<= hcp ,max-hcp))
+                             (if (and len min-losers) `(>= losers ,min-losers))
                              (if len `(>= ,suit ,(- 8 len)))))))
 
 (test (biddef '(2 C) 22 nil nil nil nil) '((2 C) . (>= hcp 22)) equal)
 (test (biddef '(1 NT) 15 17 nil nil nil) '((1 NT) . (and (>= hcp 15) (<= hcp 17))) equal)
 (test (biddef '(1 S) 12 22 4 7 3)
-      '((1 S) . (and (or (>= hcp 12) (<= losers 7)) (or (<= hcp 22) (>= losers 4)) (>= S 5)))
+      '((1 S) . (and (or (>= hcp 12) (<= losers 7)) (<= hcp 22) (>= losers 4) (>= S 5)))
       equal)
 
 (defun hcp-tricks (hcp)
@@ -568,6 +642,10 @@
 (defclass bidding-context ()
     ((our-shape :initarg :our :reader our-shape)
      (partner-shape :initarg :partner :reader partner-shape)))
+
+(defmethod print-object((this bidding-context) out)
+    (with-slots (our-shape partner-shape) this
+        (format out "BIDDING-CONTEXT<~A/~A>" our-shape partner-shape)))
 
 (defmethod established? ((this bidding-context) suit)
     (let ((my (find-in-bid (our-shape this) (curry #'match-greater suit)))
@@ -600,51 +678,70 @@
                                      (if suit length)))
                      (milestone (level)
                       (let* ((hcp (+ 25 (* 3 (- level 4)) (if (not (eq suit 'nt) )0 3)))
-                             (losers (- 7 level)))
+                             (losers (- 7 level 1)))
                          `(,(biddef (list level suit)
                                          (- hcp min-hcp) nil
                                          nil (+ losers (hcp-tricks min-hcp))
                                          (if suit length))
-                           ,@(if (or (< level 6) (> (suitno* suit) 1))
+                           ,@(if (and (or (< level 6) (> (suitno* suit) 1))
+                                      (or (not max-hcp) (> (- max-hcp min-hcp) 1)))
                                  `(,(biddef (list (- level (if (and (eq suit 'nt)
                                                                     (= level 6))
                                                                2 1))
                                                   suit)
-                                            (- hcp min-hcp 2) (- hcp min-hcp 1)
-                                            (+ losers (hcp-tricks min-hcp) 1)
+                                            (- hcp min-hcp 2) nil
+                                            nil
                                             (+ losers (hcp-tricks min-hcp) 1)
                                             (if suit length))))))))
-               `(,@(milestone 6)
-                 ,@(milestone (cond ((< (suitno* suit) 2) 5)
-                                    ((< (suitno* suit) 4) 4)
-                                    (t 3)))
-                 ,@(if (= free-levels 2)
-                       `(,(grade (jump-bid suit last-bid 1) (+ my-min 6) nil)))
-                 ,@(if (>= free-levels 1)
-                       (if (or max-hcp (eq suit (second last-bid)))
-                           `(,(grade (jump-bid suit last-bid 0) my-min nil))
-                           `(,(grade (jump-bid suit last-bid 0) (+ my-min 3) nil)))))))))
+               (propagate-from-previous
+                   (if (eq suit 'nt) (lambda (entry) (min-hcp (cdr entry)))
+                                     (f* #'cdr 
+                                         (curry* #'find-in-bid (e)
+                                             (e (curry #'matchlist '(or (>= hcp _) (<= losers _)) #'id*)))))
+                   (if (eq suit 'nt)
+                       (lambda (lim entry)
+                           (let ((bid (car entry)) (rule (cdr entry)))
+                                (cons bid (build-and rule (list '< 'hcp lim)))))
+                       (lambda (lim entry)
+                           (let ((bid (car entry)) (rule (cdr entry)))
+                                (cons bid (append rule (if (first lim) `((< hcp ,(first lim))))
+                                                       (if (second lim) `((> losers ,(second lim)))))))))
+                 `(,@(milestone 6)
+                   ,@(milestone (cond ((< (suitno* suit) 2) 5)
+                                      ((< (suitno* suit) 4) 4)
+                                      (t 3)))
+                   ,@(if (= free-levels 2)
+                         `(,(grade (jump-bid suit last-bid 1) (+ my-min 6) nil)))
+                   ,@(if (>= free-levels 1)
+                         (if (or max-hcp (eq suit (second last-bid)))
+                             `(,(grade (jump-bid suit last-bid 0) my-min nil))
+                             `(,(grade (jump-bid suit last-bid 0) (+ my-min 3) nil))))))))))
 
 (let ((ctx (make-instance 'bidding-context :our '(and (>= hcp 6) (> s 4)) 
                                            :partner '(and (>= hcp 12) (<= hcp 14) (>= c 3)))))
     (test (bid-ladder ctx '(1 NT))
-          '(((6 NT) >= HCP 22) ((4 NT) AND (>= HCP 20) (<= HCP 21))
-            ((3 NT) >= HCP 13) ((2 NT) AND (>= HCP 11) (<= HCP 12))) equal)
+          '(((6 NT) >= HCP 22) ((4 NT) AND (>= HCP 20) (< HCP 22))
+            ((3 NT) AND (>= HCP 13) (< HCP 20)) ((2 NT) AND (>= HCP 11) (< HCP 13)))
+          equal)
     (test (bid-ladder ctx '(1 NT) 'c 3)
-          '(((6 C) AND (OR (>= HCP 19) (<= LOSERS 5)) (>= C 5))
-            ((5 C) AND (OR (>= HCP 16) (<= LOSERS 6)) (>= C 5))
-            ((4 C) AND (OR (>= HCP 14) (<= LOSERS 7)) (OR (<= HCP 15) (>= LOSERS 7))
-            (>= C 5))
-            ((3 C) AND (OR (>= HCP 12) (<= LOSERS 7)) (>= C 5))
-            ((2 C) AND (OR (>= HCP 6) (<= LOSERS 9)) (>= C 5)))
-    equal))
+          '(((6 C) AND (OR (>= HCP 19) (<= LOSERS 4)) (>= C 5))
+            ((5 C) AND (OR (>= HCP 16) (<= LOSERS 5)) (>= C 5) (< HCP 19) (> LOSERS 4))
+            ((4 C) AND (OR (>= HCP 14) (<= LOSERS 6)) (>= C 5) (< HCP 16) (> LOSERS 5))
+            ((3 C) AND (OR (>= HCP 12) (<= LOSERS 7)) (>= C 5) (< HCP 14) (> LOSERS 6))
+            ((2 C) AND (OR (>= HCP 6) (<= LOSERS 9)) (>= C 5) (< HCP 12) (> LOSERS 7)))
+          equal))
+
+(defun below-4-lev (x)
+    (let ((lvl (seektree '(0 0) x))) (and lvl (< lvl 4))))
 
 (defmethod new-suit-bids ((this bidding-context) last-bid)
     (with-slots (our-shape partner-shape) this
       (let* ((my-min (min-hcp our-shape))
              (last-suit (second last-bid)))
-        (remove nil
-          (loop for s in '(C D H S)
+        (filter #'below-4-lev
+          (loop for s in (if (< (suitno* last-suit) 3)
+                             (roll (- (+ (suitno* last-suit) 1)) '(C D H S))
+                             '(C D H S))
                 unless (or (eq s last-suit)
                            (find-in-bid our-shape (curry #'match-greater s)))
                 collect (let* ((partner-max (find-in-bid partner-shape (curry #'match-smaller s)))
@@ -661,7 +758,7 @@
 (defmethod extend-suit-bids ((this bidding-context) last-bid)
     (with-slots (our-shape partner-shape) this
       (let* ((my-min (min-hcp our-shape)))
-        (remove nil
+        (filter #'below-4-lev
           (apply #'append
             (loop for s in '(C D H S)
                   for prev-len = (find-in-bid our-shape (curry #'match-greater s))
@@ -695,14 +792,14 @@
                   (further-bid '(and (>= hcp 12) (<= hcp 22) (>= D 5))
                                '(and (>= hcp 6) (>= S 4))
                                '(1 S)))
-      '(4 S)
+      '(3 S)
       equal)
 
 (test (choose-bid (str2hand "♣ A ♦ AK7654 ♥ K7 ♠ KJ105")
                   (further-bid '(and (>= hcp 12) (<= hcp 22) (>= D 5))
                                '(and (> hcp 5) (>= S 4))
                                '(1 S)))
-      '(5 S)
+      '(4 S)
       equal)
       
 (test (choose-bid (str2hand "♣ Q54 ♦ AK106 ♥ QJ ♠ KQ105")
@@ -772,6 +869,10 @@
      (meanings :initform (list nil nil))
      (bid-scheme :initform openings)))
 
+(defmethod print-object((this bidding) out)
+    (with-slots (meanings bids) this
+        (format out "BIDDING<~A : ~A>" meanings bids)))
+
 ;; Advance to the next call:
 ;; - Scan (N,E,S,W) for the first hand matching the current scheme.
 ;; - Rotate the deal (roll), update history and meanings.
@@ -808,6 +909,13 @@
                                 (str2hand "E: ♠ 62 ♥ AJ75 ♦ A942 ♣ 987")
                                 (str2hand "S: ♠ AKJ5 ♥ K1064 ♦ Q87 ♣ A6")
                                 (str2hand "W: ♠ 843 ♥ Q982 ♦ 5 ♣ QJ543"))))
-      '((1 NT) (2 C) (2 H) (2 S) (4 S) (5 S)) 
+      '((1 NT) (2 C) (2 H) (2 S) (4 S)) 
       equal)
 
+(test (drain (make-instance 'bidding
+                    :deal (list (str2hand "N: ♠ AQ1097 ♥ 32 ♦ KQJ10 ♣ K10")
+                                (str2hand "E: ♠ K62 ♥ AJ7654 ♦ A ♣ 9872")
+                                (str2hand "S: ♠ J853 ♥ KQ10 ♦ 987 ♣ AJ6")
+                                (str2hand "W: ♠ 4 ♥ 98 ♦ 65432 ♣ Q543"))))
+      '((1 S) (3 S) (4 S))
+      equal)
