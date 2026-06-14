@@ -18,7 +18,7 @@
 ; Module: bidding.cl — bridge bidding heuristics (SAYC‑like)
 ; Purpose:
 ; - For a given hand and bidding history, produce the next call (or a table mapping calls to conditions).
-; - Operates on hand metrics: suit lengths (lens), HCP per suit (power), total losers (loosers).
+; - Operates on hand metrics: suit lengths (lens), HCP per suit (power), total losers.
 ; Dependencies:
 ; - Utility functions/macros from bridge.cl: str2hand, suits, suit-hcp, suitno, suitsym,
 ;   fold, filter, mapcar, curry, lambda-dot, letcar, let-from*, let-from!, with-results, test, etc.
@@ -34,7 +34,7 @@
 ; Conventions:
 ; - Suits: C, D, H, S, NT; suitsym/suitno convert between symbol and index.
 ; - power is HCP per suit; hcp is the sum.
-; - loosers is simplified LTC; lower is better.
+; - losers is simplified LTC; lower is better.
 ; - “Rules” are plain s-expressions (and/or, comparisons), evaluated by good-opening?.
 ; - Bidding tables are alists: (bid . rule).
 ; - A bid is a pair (level, suit), e.g., '(1 S), '(2 NT).
@@ -43,19 +43,19 @@
 
 ;; Simplified LTC for a single suit.
 ;; Returns the number of losing tricks in a suit based on presence of A/K/Q (12/11/10) and length.
-(defun suit-loosers (ranks)
+(defun suit-losers (ranks)
     "Calculate the number of losing tricks in a suit based on its ranks."
     (+ (if (or (find 12 ranks) (= (length ranks) 0)) 0 1)
        (if (or (find 11 ranks) (< (length ranks) 2)) 0 1)
        (if (or (find 10 ranks) (< (length ranks) 3)) 0 1)))
 
-(test (suit-loosers '(12 2)) 1 eq)
-(test (suit-loosers '(12 11 6 5 4)) 1 eq)
-(test (suit-loosers '()) 0 eq)
-(test (suit-loosers '(11 10)) 1 eq)
-(test (suit-loosers '(10 9 8 7)) 2 eq)
-(test (suit-loosers '(12 10 9 8 7)) 1 eq)
-(test (suit-loosers '(7)) 1 eq)
+(test (suit-losers '(12 2)) 1 eq)
+(test (suit-losers '(12 11 6 5 4)) 1 eq)
+(test (suit-losers '()) 0 eq)
+(test (suit-losers '(11 10)) 1 eq)
+(test (suit-losers '(10 9 8 7)) 2 eq)
+(test (suit-losers '(12 10 9 8 7)) 1 eq)
+(test (suit-losers '(7)) 1 eq)
 
 ;; Hand assessment core:
 ;; - Returns (lens, power, losers); optional measure allows injecting a predicate/metric over these three.
@@ -65,14 +65,14 @@
     Optionally apply a measure function to the results."
     (let ((vals (list (mapcar #'length (suits hand))
                       (mapcar #'suit-hcp (suits hand))
-                      (apply #'+ (mapcar #'suit-loosers (suits hand))))))
+                      (apply #'+ (mapcar #'suit-losers (suits hand))))))
        (if measure (apply measure vals)
            vals)))
 
 ;; Hand balancedness by shape/strength. Used in openings and NT responses.
-(defun balanced? (lens power loosers)
+(defun balanced? (lens power losers)
     "Determine if a hand is balanced based on its length, power, and losing tricks."
-    (declare (ignore loosers))
+    (declare (ignore losers))
     (and (not (find-if (curry #'> 2) lens))
          (not (find-if (curry #'< 4) (reorder lens '(2 3))))
          (not (find-if (curry #'< 5) (reorder lens '(0 1))))
@@ -93,7 +93,7 @@
 
 ;; Rule evaluator: substitutes local symbols (C, D, H, S, hcp, power, balanced, losers, etc.)
 ;; into the rule s-expression and evals it. Used by choose-bid/test-bid and openings.
-(defun good-opening? (rules lens power loosers)
+(defun good-opening? (rules lens power losers)
     "Check if a hand meets the criteria for a good opening bid based on given rules."
     (eval (sublis `((C . ,(first lens))
                     (D . ,(second lens))
@@ -106,7 +106,7 @@
                     (lens . ',lens)
                     (power . ',power)
                     (hcp . ,(apply #'+ power))
-                    (loosers . ,loosers)
+                    (losers . ,losers)
                     (balanced . (balanced? ',lens ',power nil)))
                   rules)))
 
@@ -117,29 +117,29 @@
 (defparameter openings 
                  '(((2 C) . (or (> hcp 22)
                                 (and (not balanced)
-                                     (cond ((find-if (curry #'< 4) (subseq lens 2 4)) (<= loosers 4))
-                                           ((find-if (curry #'< 4) (subseq lens 0 2)) (<= loosers 3))))))
+                                     (cond ((find-if (curry #'< 4) (subseq lens 2 4)) (<= losers 4))
+                                           ((find-if (curry #'< 4) (subseq lens 0 2)) (<= losers 3))))))
                    ((2 NT) . (and balanced (not (find-if (curry #'> 3) power))
                                   (> hcp 18)))
                    ((1 NT) . (and balanced (> hcp 14) (< hcp 18)))
-                   ((1 S) . (and (or (< loosers 6) (> hcp 11))
-                                 (> loosers 4) (< hcp 23)
+                   ((1 S) . (and (or (< losers 6) (> hcp 11))
+                                 (> losers 4) (< hcp 23)
                                  (>= S 5)
                                  (not (and (> hcp 16) (find-if (curry #'< 4) (subseq lens 0 3))))))
-                   ((1 H) . (and (or (< loosers 6) (> hcp 11))
-                                 (> loosers 4) (< hcp 23)
+                   ((1 H) . (and (or (< losers 6) (> hcp 11))
+                                 (> losers 4) (< hcp 23)
                                  (>= H 5)
                                  (not (and (> hcp 16) (find-if (curry #'< 4) (subseq lens 0 2))))))
-                   ((1 D) . (and (or (< loosers 6) (> hcp 11))
-                                 (> loosers 3) (< hcp 23)
+                   ((1 D) . (and (or (< losers 6) (> hcp 11))
+                                 (> losers 3) (< hcp 23)
                                  (>= D 4) (>= D C)
                                  (not (and (> hcp 16) (>= C 5)))))
-                   ((1 C) . (and (or (< loosers 6) (> hcp 11))
-                                 (> loosers 3) (< hcp 23)
+                   ((1 C) . (and (or (< losers 6) (> hcp 11))
+                                 (> losers 3) (< hcp 23)
                                  (>= C 3)))
-                   ((2 D) . (and (> hcp 5) (>= Dpower 5) (or (> loosers 5) (< hcp 11)) (= D 6)))
-                   ((2 H) . (and (> hcp 5) (>= Hpower 5) (or (> loosers 5) (< hcp 11)) (= H 6)))
-                   ((2 S) . (and (> hcp 5) (>= Spower 5) (or (> loosers 5) (< hcp 11)) (= S 6)))
+                   ((2 D) . (and (> hcp 5) (>= Dpower 5) (or (> losers 5) (< hcp 11)) (= D 6)))
+                   ((2 H) . (and (> hcp 5) (>= Hpower 5) (or (> losers 5) (< hcp 11)) (= H 6)))
+                   ((2 S) . (and (> hcp 5) (>= Spower 5) (or (> losers 5) (< hcp 11)) (= S 6)))
                    ((3 C) . (and (> hcp 5) (>= Cpower 5) (< hcp 11) (>= C 7)))
                    ((3 D) . (and (> hcp 5) (>= Dpower 5) (< hcp 11) (>= D 7)))
                    ((3 H) . (and (> hcp 5) (>= Hpower 5) (< hcp 11) (>= H 7)))
@@ -490,7 +490,7 @@
 
 ;; Compute target “invite” contract for a given suit.
 (defun invite-in (suit)
-    (cond ((not suit) '(2 NT))
+    (cond ((or (not suit) (eq suit 'nt)) '(2 NT))
           ((find suit '(C D)) (list 4 suit))
           (T (list 3 suit))))
 
@@ -524,103 +524,139 @@
 (test (bid-jump '(1 C) '(3 D)) 2 eq)
 (test (bid-jump '(2 S) '(2 H)) -1 eq)
 
+(defun build-or (&rest forms)
+    (let ((nonnull (filter #'id forms)))
+        (if (> (length nonnull) 1) (cons 'or nonnull) (car nonnull))))
+
+(defun build-and (&rest forms)
+    (let ((nonnull (filter #'id forms)))
+        (if (> (length nonnull) 1) (cons 'and nonnull) (car nonnull))))
+
 ;; Build (bid . rule) pair for suit continuations: conditions on hcp/losers
 ;; and minimum fit vs known partner length.
-;; Note: (- 8 len) — we aim for an 8+ card fit across the partnership.
-(defun suit-biddef (bid min-hcp max-hcp min-losers max-losers len)
+;; Note: (- 8 len) — we aim for an 8+ card fit across the partnership (if suit applies)
+(defun biddef (bid min-hcp max-hcp min-losers max-losers len)
     (let ((suit (second bid)))
-        (cons bid `(and (or ,(if min-hcp `(>= hcp ,min-hcp) T)
-                            ,(if max-losers `(<= loosers ,max-losers) T))
-                        ,@(if max-hcp `((<= hcp ,max-hcp)))
-                        ,@(if min-losers `((>= loosers ,min-losers)))
-                        (>= ,suit ,(- 8 len))))))
+        (cons bid (build-and (build-or (if min-hcp `(>= hcp ,min-hcp))
+                                       (if (and len max-losers) `(<= losers ,max-losers)))
+                             (build-or (if max-hcp `(<= hcp ,max-hcp))
+                                       (if (and len min-losers) `(>= losers ,min-losers)))
+                             (if len `(>= ,suit ,(- 8 len)))))))
 
+(test (biddef '(2 C) 22 nil nil nil nil) '((2 C) . (>= hcp 22)) equal)
+(test (biddef '(1 NT) 15 17 nil nil nil) '((1 NT) . (and (>= hcp 15) (<= hcp 17))) equal)
+(test (biddef '(1 S) 12 22 4 7 3)
+      '((1 S) . (and (or (>= hcp 12) (<= losers 7)) (or (<= hcp 22) (>= losers 4)) (>= S 5)))
+      equal)
+
+(defun hcp-tricks (hcp)
+    (floor (/ hcp 3)))
+
+(defun hcp-losers (hcp)
+    (+ 7 (floor (/ (- 12 hcp) 3))))
+    
 ;; Further-bid generator:
-;; Input:
-;; - known-shape: our bounds (e.g., '(and (>= hcp 12) ...))
-;; - partner-shape: minimum assumptions inferred from partner’s previous bid
-;; - last-bid: partner’s last call, used for jump calculations
+;; First we create context object containing:
+;;    + known-shape: our bounds (e.g., '(and (>= hcp 12) ...))
+;;    + partner-shape: minimum assumptions inferred from partner’s previous bid
+;; Then we call next-bid function:
+;;    + context
+;;    + last-bid: partner’s last call, used for jump calculations
 ;; Output:
 ;; - alist mapping bids to rules, covering: game, invite, raises, closest fit, natural slams
-;; Internals: uses min-hcp/longers, game-in/invite-in, bid-jump, suit-biddef.
-(defun further-bid (known-shape partner-shape last-bid)
-    (let ((my-min (min-hcp known-shape)))
-        (with-results ((min-hcp partner-shape)
-                       (max-hcp partner-shape)
-                       (longers partner-shape))
-            (filter (f* #'first (curry #'bid-jump last-bid) (curry #'<= 0)) 
-               (append
-                  (loop for longer in longers
-                      append (let-from* longer (suit len)
-                                (let ((game-hcp (if (find suit '(C D)) 27 25))
-                                      (game-loosers (if (find suit '(C D)) 2 3))
-                                      (invite-jump (bid-jump last-bid (invite-in suit))))
-                                  `(,(suit-biddef (game-in suit)
-                                                  (- game-hcp min-hcp) (- 29 min-hcp)
-                                                  (+ 2 (floor (/ min-hcp 3)))
-                                                  (+ game-loosers (floor (/ min-hcp 3)))
-                                                  len)
-                                    ,(if (>= invite-jump 1)
-                                         (suit-biddef (invite-in suit)
-                                                      (- game-hcp min-hcp 2) (- game-hcp min-hcp)
-                                                      (+ 3 (floor (/ min-hcp 3)))
-                                                      (+ game-loosers 1 (floor (/ min-hcp 3)))
-                                                      len))
-                                     ,(if (>= invite-jump 0)
-                                        (if max-hcp
-                                          (suit-biddef (jump-bid suit last-bid 0)
-                                                       (+ my-min 3)
-                                                       (- game-hcp min-hcp 1)
-                                                       (+ 3 (floor (/ min-hcp 3)))
-                                                       (+ game-loosers 1 (floor (/ min-hcp 3)))
-                                                       len)
-                                          (suit-biddef (jump-bid suit last-bid 0)
-                                                       nil
-                                                       (- game-hcp min-hcp 1)
-                                                       nil
-                                                       nil
-                                                       len)))
-                                     ,(suit-biddef `(5 ,suit)
-                                                   (- 31 min-hcp 2) (- 30 min-hcp)
-                                                   (+ 1 (floor (/ min-hcp 3)))
-                                                   (+ 1 (floor (/ min-hcp 3)))
-                                                   len)
-                                     ,@(if (or (not (eq suit (second last-bid)))
-                                               (= (first last-bid) 1))
-                                         `((,(closest-bid suit last-bid) . (>= ,suit ,(- 8 len)))))
-                                                            ))))
-              ;; NT continuations:
-              ;; - 6NT: slam (~33 total HCP)
-              ;; - 4NT: slam invite (31-32 total HCP)
-              ;; - 3NT: game (25 total HCP)
-              ;; - 2NT: invite when there is space or when not forced
-              ;; - closest NT: nearest NT call; nonforced shows ~+3 HCP, forced allows +0..+2 HCP
-               (let* ((base-suit (second last-bid))
-                       (nt-level (if (< (suitno* base-suit) 4) (first last-bid) (+ (first last-bid) 1))))
-                  (append
-                   (list `((6 NT) . (>= hcp ,(- 33 min-hcp))))
-                   (list `((4 NT) . (and (>= hcp ,(- 31 min-hcp))
-                                         (<= hcp ,(- 32 min-hcp)))))
-                   (list `((3 NT) . (>= hcp ,(- 25 min-hcp))))
-                   (if (or (> (bid-jump last-bid '(2 NT)) 0) max-hcp)
-                       (list `((2 NT) . (and (>= hcp ,(- 25 min-hcp 2))
-                                             (<= hcp ,(- 25 min-hcp)))))
-                       '())
-                   (list (if max-hcp
-                             `((,nt-level NT) . (and (>= hcp ,(+ my-min 3))
-                                                     (<= hcp ,(- 25 min-hcp 1))))
-                             `((,nt-level NT) . (and (>= hcp ,my-min)
-                                                     (<= hcp ,(+ my-min 2))))))))
-              )))))
 
-(test (choose-bid (str2hand "♣ 9 ♦ AK7654 ♥ K7 ♠ KQ105")
+(defclass bidding-context ()
+    ((our-shape :initarg :our :reader our-shape)
+     (partner-shape :initarg :partner :reader partner-shape)))
+
+(defmethod established? ((this bidding-context) suit)
+    (let ((my (find-in-bid (our-shape this) (curry #'match-greater suit)))
+          (partner (find-in-bid (partner-shape this) (curry #'match-greater suit))))
+        (and my partner (>= (+ my partner) 8))))
+
+(test (established? (make-instance 'bidding-context :our '(and (>= hcp 12) (>= S 5))
+                                                    :partner '(and (>= hcp 6) (>= S 3)))
+                    'S)
+      T eq)
+
+(test (established? (make-instance 'bidding-context :our '(and (>= hcp 12) (>= S 5))
+                                                    :partner '(and (>= hcp 6) (>= S 3)))
+                    'H)
+      nil eq)
+
+(test (established? (make-instance 'bidding-context :our '(>= H 4)
+                                                    :partner '(> hcp 12))
+                    'H)
+      nil eq)
+
+(defmethod bid-ladder ((this bidding-context) last-bid &optional (suit 'nt) length)
+    (with-results ((min-hcp (partner-shape this))
+                   (max-hcp (partner-shape this)))
+        (let ((my-min (min-hcp (our-shape this)))
+              (free-levels (bid-jump last-bid (invite-in suit))))
+            (labels ((grade (level min max)
+                        (biddef level min max
+                                     (if max (hcp-losers max)) (hcp-losers min) 
+                                     (if suit length)))
+                     (milestone (level)
+                      (let* ((hcp (+ 25 (* 3 (- level 4)) (if (not (eq suit 'nt) )0 3)))
+                             (losers (- 7 level)))
+                         `(,(biddef (list level suit)
+                                         (- hcp min-hcp) nil
+                                         nil (+ losers (hcp-tricks min-hcp))
+                                         (if suit length))
+                           ,@(if (or (< level 6) (> (suitno* suit) 1))
+                                 `(,(biddef (list (- level (if (and (eq suit 'nt)
+                                                                    (= level 6))
+                                                               2 1))
+                                                  suit)
+                                            (- hcp min-hcp 2) (- hcp min-hcp 1)
+                                            (+ losers (hcp-tricks min-hcp) 1)
+                                            (+ losers (hcp-tricks min-hcp) 1)
+                                            (if suit length))))))))
+               `(,@(milestone 6)
+                 ,@(milestone (cond ((< (suitno* suit) 2) 5)
+                                    ((< (suitno* suit) 4) 4)
+                                    (t 3)))
+                 ,@(if (= free-levels 2)
+                       `(,(grade (jump-bid suit last-bid 1) (+ my-min 6) nil)))
+                 ,@(if (>= free-levels 1)
+                       (if (or max-hcp (eq suit (second last-bid)))
+                           `(,(grade (jump-bid suit last-bid 0) my-min nil))
+                           `(,(grade (jump-bid suit last-bid 0) (+ my-min 3) nil)))))))))
+
+(let ((ctx (make-instance 'bidding-context :our '(and (>= hcp 6) (> s 4)) 
+                                           :partner '(and (>= hcp 12) (<= hcp 14) (>= c 3)))))
+    (test (bid-ladder ctx '(1 NT))
+          '(((6 NT) >= HCP 22) ((4 NT) AND (>= HCP 20) (<= HCP 21))
+            ((3 NT) >= HCP 13) ((2 NT) AND (>= HCP 11) (<= HCP 12))) equal)
+    (test (bid-ladder ctx '(1 NT) 'c 3)
+          '(((6 C) AND (OR (>= HCP 19) (<= LOSERS 5)) (>= C 5))
+            ((5 C) AND (OR (>= HCP 16) (<= LOSERS 6)) (>= C 5))
+            ((4 C) AND (OR (>= HCP 14) (<= LOSERS 7)) (OR (<= HCP 15) (>= LOSERS 7))
+            (>= C 5))
+            ((3 C) AND (OR (>= HCP 12) (<= LOSERS 7)) (>= C 5))
+            ((2 C) AND (OR (>= HCP 6) (<= LOSERS 9)) (>= C 5)))
+    equal))
+
+(defmethod next-bid ((this bidding-context) last-bid)
+    (with-slots (our-shape partner-shape) this
+        (with-results ((longers partner-shape))
+            (filter (f* #'first (curry #'bid-jump last-bid) (curry #'<= 0))
+                (append (apply #'append (mapcar (curry #'apply (curry #'bid-ladder this last-bid)) longers))
+                        (bid-ladder this last-bid))))))
+
+(defun further-bid (our partner last-bid)
+    (next-bid (make-instance 'bidding-context :our our :partner partner) last-bid))
+
+(test (choose-bid (str2hand "♣ 9 ♦ AK7654 ♥ K8 ♠ KJ105")
                   (further-bid '(and (>= hcp 12) (<= hcp 22) (>= D 5))
                                '(and (>= hcp 6) (>= S 4))
                                '(1 S)))
       '(4 S)
       equal)
 
-(test (choose-bid (str2hand "♣ A ♦ AK7654 ♥ K7 ♠ KQ105")
+(test (choose-bid (str2hand "♣ A ♦ AK7654 ♥ K7 ♠ KJ105")
                   (further-bid '(and (>= hcp 12) (<= hcp 22) (>= D 5))
                                '(and (> hcp 5) (>= S 4))
                                '(1 S)))
