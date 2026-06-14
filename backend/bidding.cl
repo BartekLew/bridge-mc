@@ -639,12 +639,54 @@
             ((2 C) AND (OR (>= HCP 6) (<= LOSERS 9)) (>= C 5)))
     equal))
 
+(defmethod new-suit-bids ((this bidding-context) last-bid)
+    (with-slots (our-shape partner-shape) this
+      (let* ((my-min (min-hcp our-shape))
+             (last-suit (second last-bid)))
+        (remove nil
+          (loop for s in '(C D H S)
+                unless (or (eq s last-suit)
+                           (find-in-bid our-shape (curry #'match-greater s)))
+                collect (let* ((partner-max (find-in-bid partner-shape (curry #'match-smaller s)))
+                               (need (max 4 (if partner-max (- 8 partner-max) 4)))
+                               (bid (closest-bid s last-bid))
+                               (enter-new-level (> (first bid) (first last-bid)))
+                               (fit-with-last (established? this last-suit))
+                               (hc-thresh (and my-min (if (or enter-new-level fit-with-last)
+                                                          (+ my-min 3) nil)))
+                               (rule (build-and `(>= ,s ,need)
+                                                (if hc-thresh `(>= hcp ,hc-thresh)))))
+                          (and rule (cons bid rule))))))))
+
+(defmethod extend-suit-bids ((this bidding-context) last-bid)
+    (with-slots (our-shape partner-shape) this
+      (let* ((my-min (min-hcp our-shape)))
+        (remove nil
+          (apply #'append
+            (loop for s in '(C D H S)
+                  for prev-len = (find-in-bid our-shape (curry #'match-greater s))
+                  when prev-len
+                  collect
+                    (let* ((min-extra (+ prev-len 1))
+                           (cheap (closest-bid s last-bid))
+                           (jump (jump-bid s last-bid 1))
+                           (cheap-rule (build-and `(>= ,s ,min-extra)
+                                                  (if my-min `(<= hcp ,(+ my-min 5)))))
+                           (jump-rule (build-and `(>= ,s ,min-extra)
+                                                 (if my-min `(>= hcp ,(+ my-min 6))))))
+                      (remove nil
+                        (list (and jump-rule (cons jump jump-rule))
+                              (and cheap-rule (cons cheap cheap-rule)))))))))))
+
 (defmethod next-bid ((this bidding-context) last-bid)
     (with-slots (our-shape partner-shape) this
         (with-results ((longers partner-shape))
             (filter (f* #'first (curry #'bid-jump last-bid) (curry #'<= 0))
-                (append (apply #'append (mapcar (curry #'apply (curry #'bid-ladder this last-bid)) longers))
-                        (bid-ladder this last-bid))))))
+                (append
+                    (new-suit-bids this last-bid)
+                    (apply #'append (mapcar (curry #'apply (curry #'bid-ladder this last-bid)) longers))
+                    (extend-suit-bids this last-bid)
+                    (bid-ladder this last-bid))))))
 
 (defun further-bid (our partner last-bid)
     (next-bid (make-instance 'bidding-context :our our :partner partner) last-bid))
@@ -688,14 +730,14 @@
                   (further-bid '(and (>= hcp 6) (>= S 4))
                                '(and (>= hcp 12) (<= hcp 22) (>= D 5) (>= S 4))
                                '(2 S)))
-      '(3 S)
+      '(3 C)
       equal)
 
-(test (choose-bid (str2hand "♣ AJ9 ♦ K6 ♥ Q1072 ♠ AJ109")
-                  (further-bid '(and balanced (>= hcp 15) (<= hcp 17))
-                               '(and (>= hcp 8) (>= h 4))
+(test (choose-bid (str2hand "♣ 1093 ♦ K6 ♥ 10872 ♠ AJ109")
+                  (further-bid '(>= hcp 8)
+                               '(and balanced (>= hcp 15) (<= hcp 17) (>= h 4))
                                '(2 H)))
-      '(3 H)
+      '(2 S)
       equal)
       
 ;; Test that further bid choses only from biddable answers
@@ -765,7 +807,8 @@
   (test (next b) '((1 NT)) equal)
   (test (next b) '((2 C)) equal)
   (test (next b) '((2 H)) equal)
-  (test (next b) '((2 NT)) equal)
-  (test (next b) '((3 NT)) equal)
+  (test (next b) '((2 S)) equal)
+  (test (next b) '((4 S)) equal)
+  (test (next b) '((5 S)) equal)
   (test (next b) nil eq))
 
