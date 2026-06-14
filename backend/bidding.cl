@@ -796,19 +796,18 @@
                   (setf bid-scheme (bidding-scheme-for bids meanings)))
                 ;; Assume opponents are silent: alternate between opener and responder only.
                 (setf deal (roll -2 deal))
-                (list bid)))))
+                bid))))
 
-;; Test: opponents stay silent; partner uses Stayman after 1NT opening and bidding keeps going
-(let ((b (make-instance 'bidding
+(defmethod drain ((this bidding) &optional acc)
+    (let ((next (next this)))
+        (if next (drain this (cons next acc))
+                 (reverse acc))))
+    
+(test (drain (make-instance 'bidding
                     :deal (list (str2hand "N: ♠ Q1097 ♥ 3 ♦ KJ1063 ♣ K102")
                                 (str2hand "E: ♠ 62 ♥ AJ75 ♦ A942 ♣ 987")
                                 (str2hand "S: ♠ AKJ5 ♥ K1064 ♦ Q87 ♣ A6")
-                                (str2hand "W: ♠ 843 ♥ Q982 ♦ 5 ♣ QJ543")))))
-  (test (next b) '((1 NT)) equal)
-  (test (next b) '((2 C)) equal)
-  (test (next b) '((2 H)) equal)
-  (test (next b) '((2 S)) equal)
-  (test (next b) '((4 S)) equal)
-  (test (next b) '((5 S)) equal)
-  (test (next b) nil eq))
+                                (str2hand "W: ♠ 843 ♥ Q982 ♦ 5 ♣ QJ543"))))
+      '((1 NT) (2 C) (2 H) (2 S) (4 S) (5 S)) 
+      equal)
 
