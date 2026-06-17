@@ -879,37 +879,41 @@
 ;; - Choose the next response scheme based on the call (2C/NT/1x/else->further-bid).
 (defmethod next ((this bidding))
     (with-slots (deal bids meanings bid-scheme) this
-        (let-from! (fold (lambda (acc val)
-                            (if acc acc
-                              (let ((bid (choose-bid (nth val deal) bid-scheme)))
-                                (if bid (list val bid)))))
-                         nil
-                         (if bids '(0) '(0 1 2 3)))
-                   (passes bid)
-            (when passes
-                (setf deal (roll (- passes) deal))
-                (setf bids (append bids (list bid)))
-                (let ((our-shape (first meanings))
-                      (partner-shape (second meanings))
-                      (bid-meaning (assoc bid bid-scheme)))
-                  (setf meanings (list partner-shape
-                                       (merge-shapes our-shape (cdr bid-meaning))))
-                  (setf bid-scheme (bidding-scheme-for bids meanings)))
-                ;; Assume opponents are silent: alternate between opener and responder only.
-                (setf deal (roll -2 deal))
-                bid))))
+        (labels ((apply-bid (call)
+                   (setf bids (append bids (list call)))
+                   (when call
+                     (let ((our-shape (first meanings))
+                           (partner-shape (second meanings))
+                           (bid-meaning (assoc call bid-scheme)))
+                       (setf meanings (list partner-shape
+                                            (merge-shapes our-shape (cdr bid-meaning))))
+                       (setf bid-scheme (bidding-scheme-for (remove nil bids) meanings))))
+                   (setf deal (roll -1 deal))
+                   call))
+          (let* ((last-call (car (last bids)))
+                 (third-ago (and (>= (length bids) 3)
+                                 (nth (- (length bids) 3) bids)))
+                 (auto-pass (or last-call third-ago)))
+            (if auto-pass
+                (apply-bid nil)
+                (apply-bid (choose-bid (first deal) bid-scheme)))))))
 
 (defmethod drain ((this bidding) &optional acc)
-    (let ((next (next this)))
-        (if next (drain this (cons next acc))
-                 (reverse acc))))
+    (let ((res (next this)))
+        (let ((new-acc (cons res acc)))
+          (if (and (> (length new-acc) 3)
+                   (null (first new-acc))
+                   (null (second new-acc))
+                   (null (third new-acc)))
+              (reverse new-acc)
+              (drain this new-acc)))))
     
 (test (drain (make-instance 'bidding
                     :deal (list (str2hand "N: ♠ Q1097 ♥ 3 ♦ KJ1063 ♣ K102")
                                 (str2hand "E: ♠ 62 ♥ AJ75 ♦ A942 ♣ 987")
                                 (str2hand "S: ♠ AKJ5 ♥ K1064 ♦ Q87 ♣ A6")
                                 (str2hand "W: ♠ 843 ♥ Q982 ♦ 5 ♣ QJ543"))))
-      '((1 NT) (2 C) (2 H) (2 S) (4 S)) 
+      '(nil nil (1 NT) nil (2 C) nil (2 H) nil (2 S) nil (4 S) nil nil nil) 
       equal)
 
 (test (drain (make-instance 'bidding
@@ -917,5 +921,5 @@
                                 (str2hand "E: ♠ K62 ♥ AJ7654 ♦ A ♣ 9872")
                                 (str2hand "S: ♠ J853 ♥ KQ10 ♦ 987 ♣ AJ6")
                                 (str2hand "W: ♠ 4 ♥ 98 ♦ 65432 ♣ Q543"))))
-      '((1 S) (3 S) (4 S))
+      '((1 S) nil (3 S) nil (4 S) nil nil nil)
       equal)
