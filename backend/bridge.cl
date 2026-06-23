@@ -615,11 +615,12 @@
 
 (defun print-hand (hand)
     (apply #'format (append (list nil "~A ~A ~A ~A")
-                            (loop for suit in '("♣" "♦" "♥" "♠")
+                            (loop for suit in '("♠" "♥" "♦" "♣")
                                   for cards in (mapcar (curry #'mapcar (lambda (x) 
                                                                 (nth x '(2 3 4 5 6 7 8 9 10 J Q K A))))
-                                                       (mapcar (lambda (s) (sort (copy-list s) #'>))
-                                                               hand))
+                                                       (reverse (mapcar (lambda (s) 
+                                                                    (sort (copy-list s) #'>))
+                                                                    hand)))
                                   collect (format nil "~A ~{~A~}" suit cards)))))
 
 ; pretty print for deal (result of deal-all function)
@@ -627,7 +628,9 @@
     (loop for name in names
           for hand in hands
           do (format out "~A: ~A~%" name 
-                     (print-hand hand))))
+                     (if (eq (type-of hand) 'hand) 
+                         (print-hand (suits hand)) 
+                         (print-hand hand)))))
 
 ;; ======================
 ;; DEALING CARDS
@@ -1206,6 +1209,18 @@
       '(:hcp (0 11))
       equal)
     
+;; infer-suit-ranges:
+;; Given the remaining card supply per suit/HCP (supply) and the desired spec
+;; for the current hand (base-params), adjust/tighten suit length (and optional
+;; suit HCP) ranges so that generating this hand still leaves enough supply to
+;; generate all subsequent hands (other-defs).
+;; It:
+;; - computes feasible min/max suit lengths after reserving cards for other-defs,
+;; - intersects user-provided constraints (number or (min max [hcp])) with those bounds,
+;; - refines per-suit HCP constraints via infer-hcp-range when present,
+;; - signals bad-range on inconsistencies (min > max or value outside bounds),
+;; - returns a plist like (:c (min max [hcp]) :d ... :h ... :s ...);
+;;   omitted keys mean no further restriction beyond feasible limits.
 (defun infer-suit-ranges (supply base-params &rest other-defs)
     (let* ((suitlen (mapcar (curry #'apply #'+) supply))
            (min-len (if (= (hands-in-supply supply) (+ (length other-defs) 1))
@@ -1231,7 +1246,7 @@
                   for key in '(:c :d :h :s)
                   for def in (list c d h s)
                   append (let ((up-limit (min maxlen slen)))
-                              (cond ((not def) (if (< up-limit slen) `(,key (,minlen ,up-limit))))
+                              (cond ((not def) (if (or (< up-limit slen) (> minlen 0)) `(,key (,minlen ,up-limit))))
                                     ((listp def) (let ((down (if (first def) (max (first def) minlen)
                                                                              minlen))
                                                        (up (if (second def) (min (second def) up-limit)
@@ -1279,6 +1294,11 @@
                                               '(:hcp (15 17) :c 1)
                                               '(:c 3))
       '(:c (4 6) :d (0 12) :h (0 2))
+      equal)
+
+(test (INFER-SUIT-RANGES '((4 0 1 1 1) (4 1 1 0 0) (6 0 1 0 1) (4 1 0 0 0)) 
+                           NIL '(:HCP (6 10) :S (NIL 3) :H (NIL 3)))
+      '(:h (5 8) :s (2 5))
       equal)
 
 (defun infer-distgen-params (supply base others)
