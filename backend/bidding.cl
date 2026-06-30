@@ -58,21 +58,25 @@
 (test (suit-losers '(7)) 1 eq)
 
 ;; Hand assessment core:
-;; - Returns (lens, power, losers); optional measure allows injecting a predicate/metric over these three.
+;; - Returns (lens, power, losers, stopper-points); optional measure allows injecting a predicate/metric over these four.
 ;; - Used by good-opening?, choose-bid and all response tables.
 (defun assess-hand (hand &optional measure)
-    "Assess a hand by calculating its length, high card points (HCP), and losing tricks.
+    "Assess a hand by calculating its length, high card points (HCP), losing tricks and stopper-points.
     Optionally apply a measure function to the results."
-    (let ((vals (list (mapcar #'length (suits hand))
-                      (mapcar #'suit-hcp (suits hand))
-                      (apply #'+ (mapcar #'suit-losers (suits hand))))))
+    (let* ((suit-lists (suits hand))
+           (lens (mapcar #'length suit-lists))
+           (power (mapcar #'suit-hcp suit-lists))
+           (losers (apply #'+ (mapcar #'suit-losers suit-lists)))
+           (stopper-points (mapcar (lambda (ranks hcp) (+ (length ranks) hcp))
+                                   suit-lists power))
+           (vals (list lens power losers stopper-points)))
        (if measure (apply measure vals)
            vals)))
 
 ;; Hand balancedness by shape/strength. Used in openings and NT responses.
-(defun balanced? (lens power losers)
-    "Determine if a hand is balanced based on its length, power, and losing tricks."
-    (declare (ignore losers))
+(defun balanced? (lens power losers stopper-points)
+    "Determine if a hand is balanced based on its length, power, losers and stopper-points."
+    (declare (ignore losers stopper-points))
     (and (not (find-if (curry #'> 2) lens))
          (not (find-if (curry #'< 4) (reorder lens '(2 3))))
          (not (find-if (curry #'< 5) (reorder lens '(0 1))))
@@ -91,9 +95,9 @@
 ; List of openings with rules as defined in good-opening?
 ; =======================================================
 
-;; Rule evaluator: substitutes local symbols (C, D, H, S, hcp, power, balanced, losers, etc.)
+;; Rule evaluator: substitutes local symbols (C, D, H, S, hcp, power, balanced, losers, stopper-points, etc.)
 ;; into the rule s-expression and evals it. Used by choose-bid/test-bid and openings.
-(defun good-opening? (rules lens power losers)
+(defun good-opening? (rules lens power losers stopper-points)
     "Check if a hand meets the criteria for a good opening bid based on given rules."
     (eval (sublis `((C . ,(first lens))
                     (D . ,(second lens))
@@ -103,11 +107,16 @@
                     (Dpower . ,(second power))
                     (Hpower . ,(third power))
                     (Spower . ,(fourth power))
+                    (Cstop . ,(first stopper-points))
+                    (Dstop . ,(second stopper-points))
+                    (Hstop . ,(third stopper-points))
+                    (Sstop . ,(fourth stopper-points))
                     (lens . ',lens)
                     (power . ',power)
                     (hcp . ,(apply #'+ power))
                     (losers . ,losers)
-                    (balanced . (balanced? ',lens ',power nil)))
+                    (stopper-points . ',stopper-points)
+                    (balanced . (balanced? ',lens ',power nil nil)))
                   rules)))
 
 (defvar balanced (append (loop for s in '(c d h s)
@@ -370,7 +379,6 @@
 ;; - for upper bounds (</<=) pick the lower threshold; if equal, '<' is stricter than '<='
 (defun merge-shapes (a b)
     (labels ((extract-or-hcp-losers (form)
-                (when (and (listp form) (eq (first form) 'or))
                   (let* ((subs (cdr form))
                          (hcp-lb (find-if (lambda (x)
                                             (and (listp x) (= (length x) 3)
@@ -382,7 +390,7 @@
                                                     (or (eq (first x) '<=) (eq (first x) '<))
                                                     (eq (second x) 'losers)))
                                              subs)))
-                    (remove nil (list hcp-lb losers-ub)))))
+                    (remove nil (list hcp-lb losers-ub))))
              (clauses (shape)
                 (cond ((not shape) nil)
                       ((and (listp shape) (eq (first shape) 'and))
@@ -522,10 +530,11 @@
       equal)
 
 (defun filter-bid (bid-meaning fn)
-    (letcar bid-meaning
-        (if (find head '(AND OR))
-            (filter #'id (mapcar fn tail))
-            (apply fn bid-meaning))))
+    (if bid-meaning
+      (letcar bid-meaning
+          (if (find head '(AND OR))
+              (filter #'id (mapcar fn tail))
+              (apply fn bid-meaning)))))
 
 ;; Extract useful metadata from shape definitions:
 ;; - max-hcp/min-hcp: strength bounds
@@ -568,17 +577,17 @@
           ((eq suit 'NT) 4)
           (t (suitno suit))))
 
-;; Closest legal call in the given suit relative to the base bid.
-(defun closest-bid (suit base)
-    (if (> (suitno suit) (suitno* (second base)))
-        (list (first base) suit)
-        (list (+ (first base) 1) suit)))
-
 ;; Jump by the given number of “levels” relative to the base bid.
 (defun jump-bid (suit base levels)
-    (if (> (suitno suit) (suitno* (second base)))
-        (list (+ (first base) levels) suit)
-        (list (+ (first base) levels 1) suit)))
+    (let ((level (if (> (suitno suit) (suitno* (second base)))
+                     (+ (first base) levels)
+                     (+ (first base) levels 1))))
+      (if (<= level 7)
+        (list level suit))))
+
+;; Closest legal call in the given suit relative to the base bid.
+(defun closest-bid (suit base)
+    (jump-bid suit base 0))
 
 ;; Jump difference between base and a concrete bid (accounts for suit order).
 (defun bid-jump (base bid)
@@ -600,6 +609,7 @@
                     (letcar rest
                         (walk head tail (cons (funcall set (funcall extract prev) head)
                                               acc))))))
+
         (if lst (cons (car lst) (walk (car lst) (cdr lst))))))
 
 (test (propagate-from-previous #'id #'+ '(1 2 3 4 5))
@@ -845,29 +855,319 @@
       nil
       equal)
 
+;; Complement of a list of bid rules (used for Pass meanings).
+;; Negates the disjunction of the supplied rules using De Morgan and comparison inversion.
+;; Uses alist for operator negation, build-and/build-or, and merge-shapes for multiple rules.
+(defun complement-bid-rules (rules)
+    (let ((op-map '((< . >=) (<= . >) (> . <=) (>= . <))))
+        (labels ((negate-one (r)
+                   (cond ((not r) nil)
+                         ((and (listp r) (eq (first r) 'and))
+                          (apply #'build-or (mapcar #'negate-one (cdr r))))
+                         ((and (listp r) (eq (first r) 'or))
+                          (apply #'build-and (mapcar #'negate-one (cdr r))))
+                         ((and (listp r) (assoc (first r) op-map))
+                          (let ((op (first r)) (var (second r)) (val (third r)))
+                            (list (cdr (assoc op op-map)) var val)))
+                         (t `(not ,r)))))
+          (cond ((null rules) t)
+                ((= (length rules) 1) (negate-one (first rules)))
+                (t (fold #'merge-shapes (negate-one (first rules)) (mapcar #'negate-one (cdr rules))))))))
+
+(test (complement-bid-rules '((>= S 5)))
+      '(< S 5)
+      equal)
+
+(test (complement-bid-rules '((and (>= hcp 12) (<= hcp 22) (>= S 5))))
+      '(or (< hcp 12) (> hcp 22) (< S 5))
+      equal)
+
+(test (complement-bid-rules '((or (>= hcp 12) (<= losers 7))))
+      '(and (< hcp 12) (> losers 7))
+      equal)
+
+;; TODO: should pass when merge-shapes support ors correctly
+;(test (complement-bid-rules '((and (>= hcp 12) (<= hcp 22) (>= S 5))
+;                              (>= hcp 23)))
+;      '(or (< hcp 12) (and (< hcp 23) (< S 5)))
+;      equal)
+;
+;(test (complement-bid-rules '((>= hcp 8) (<= hcp 17) (>= S 5)))
+;      '(and (< hcp 8) (> hcp 17) (< S 5))
+;      equal)
+
+(defun mksym (&rest strs)
+    (read-from-string (format nil "~{~A~}" strs)))
+
+;; Simple first-overcall table generator.
+(defun simple-overcall (last-bid &optional opp-bids)
+    (let* ((opp-suit (second last-bid))
+           (opp-suits (if opp-bids (unique (filter (lambda (x) (and x (not (eq x 'nt))))
+                                                   (mapcar #'second opp-bids))
+                                           :cmp #'suit<>)
+                          (if opp-suit (list opp-suit))))
+           (non-bid-suits (list- '(C D H S) opp-suits :test #'eq)))
+      (append
+       ;; 1NT overcall (legal if higher than last bid)
+         (let ((closest-nt (jump-bid 'nt last-bid 0)))
+            `(,@(if (< (car closest-nt) 3)
+                    `((,closest-nt . (and (>= hcp 15) (<= hcp 18)
+                                          ,@(mapcar (lambda (x) `(>= ,x 2)) '(C D H S))
+                                          ,@(mapcar (lambda (s) `(>= ,(mksym s "stop") 6))
+                                                    opp-suits)))))
+             ,@(if (< (car closest-nt) 2)
+                   `(((2 NT) . (and (>= hcp 8) (<= hcp 17) (>= C 5) (>= D 5)))))))
+       ;; new suit overcalls (non-jump, legal)
+       (loop for s in '(C D H S)
+             for bid = (jump-bid s last-bid 0)
+             when (and (>= (bid-jump last-bid bid) 0)
+                       (not (find s opp-suits :test #'eq)))
+             collect `(,bid . (and (>= hcp 8) (< hcp 18) (>= ,(suitsym (suitno s)) 5)
+                                   (or (>= ,(mksym s "power") 4) (>= hcp 12)))))
+       ;; jump overcalls (weak)
+       (loop for s in '(C D H S)
+             for bid = (jump-bid s last-bid 1)
+             when (and (> (bid-jump last-bid bid) 0)
+                       (not (find s opp-suits :test #'eq)))
+             collect `(,bid . (and (> hcp 5) (>= ,(mksym s "power") 5)
+                                   (or (> losers 5) (< hcp 11))
+                                   (= ,(suitsym (suitno s)) ,(if (find s '(C D)) 7 6)))))
+       ;; Michaels cue-bid (non-jump over opponent's suit)
+       (if opp-suit
+           (let ((cue-bid (jump-bid opp-suit last-bid 0)))
+             `((,cue-bid . (and (>= hcp 8) (<= hcp 16)
+                                ,@(if (eq opp-suit 'D)
+                                      '((>= H 5) (>= S 5))
+                                      `((>= ,(if (eq opp-suit 'H) 'S 'H) 5)
+                                        (or (>= C 5) (>= D 5)))))))))
+       ;; takeout double (12-17 or 18+); strong double has no suit constraints
+       (let ((double-rules
+               (append
+                (loop for s in opp-suits
+                      collect `(<= ,(suitsym (suitno s)) 2))
+                (loop for s in non-bid-suits
+                      collect `(>= ,(suitsym (suitno s)) 3)))))
+         `((X . (or (and (>= hcp 12) (<= hcp 17) ,@double-rules)
+                    (>= hcp 18))))))))
+
+(defun game-hcp (suit) (if (find suit '(C D)) 27 25))
+
+(defun level-bid (partner-min suit len last-bid)
+    (let ((bid (jump-bid suit last-bid 0)))
+        (if bid (let* ((min-hcp (- (+ 13 (* 3 (first bid))) partner-min))
+                       (max-hcp (- (game-hcp suit) partner-min 3)))
+                   (if (>= max-hcp min-hcp)
+                      (cons bid `(and (>= hcp ,min-hcp) (<= hcp ,max-hcp) (>= ,suit ,len))))))))
+
+(defun legal-bid (bid last-bid last-opp?)
+    (cond ((not bid) T)
+          ((listp bid) (>= (bid-jump last-bid bid) 0))
+          ((eq bid 'x) (and last-opp? (not (third last-bid))))
+          ((eq bid 'xx) (and last-opp? (eq (third last-bid) 'x)))))
+
+(defun merge-bid-rules (rules last-bid opp-bids)
+    (fold (lambda (acc rule)
+            (let ((bid (car rule))
+                  (last-opp? (find last-bid opp-bids :test #'equal)))
+                (if (legal-bid bid last-bid last-opp?)
+                    (let ((meaning (cdr rule))
+                          (acc-rule (assoc bid acc)))
+                       (if acc-rule (let ((acc-meaning (cdr acc-rule)))
+                                        (if (eq (first acc-meaning) 'or)
+                                            (setf (cdr (last acc-meaning)) meaning)
+                                            (setf (cdr acc-rule) `(or ,acc-meaning ,meaning)))
+                                        acc)
+                                    (append acc (list rule))))
+                    acc)))
+          nil
+          rules))
+
+(test (merge-bid-rules '(((1 S) . (and (>= hcp 6) (>= S 4)))
+                         (x . (and (>= hcp 10) (>= S 4)))
+                         ((1 H) . (and (>= hcp 6) (>= H 4)))
+                         (xx . (and (>= hcp 10) (> D 4)))
+                         (x . (and (>= hcp 10) (>= H 4))))
+                       '(1 D) '((1 D)))
+      '(((1 S) AND (>= HCP 6) (>= S 4))
+        (X OR (AND (>= HCP 10) (>= S 4)) (AND (>= HCP 10) (>= H 4)))
+        ((1 H) AND (>= HCP 6) (>= H 4)))
+      equal)
+
+
+                  
+;; Competitive further-bid (new function for competitive auctions)
+(defun competitive-further-bid (our partner last-bid opp-bids)
+  (let* ((partner-min (min-hcp partner))
+         (opp-suits (filter (curry #'neq 'nt) (mapcar #'second opp-bids)))
+         (last-opp-suit (car (last opp-suits)))
+         (partner-long-suits (longers partner))
+         (bid-scheme nil))
+
+    (dolist (suit '(C D H S))
+      (let ((partner-len   (or (find-in-bid partner (curry #'match-greater suit)) 0))
+            (my-len        (or (find-in-bid our     (curry #'match-greater suit)) 0))
+            (already-shown (find-in-bid our (curry #'match-greater suit))))
+
+        (cond
+          ((> partner-len 0)
+           ;; cheapest raise
+           (let ((bid (level-bid partner-min suit (- 8 partner-len) last-bid)))
+              (if bid (push bid bid-scheme)))
+           ;; game in partner's suit
+           (push (cons (game-in suit)
+                       `(>= hcp ,(- (game-hcp suit) (or partner-min 0))))
+                 bid-scheme)
+           ;; preemptive jump – strength limit is inside the rule
+           (let ((preempt (jump-bid suit last-bid 1)))
+             (if (and preempt (<= (first preempt) 3))
+                (push (cons preempt
+                            `(and (> hcp 5) (<= hcp 8)
+                                  (>= ,(mksym suit "power") 5)
+                                  (or (> losers 5) (< hcp 11))))
+                      bid-scheme))))
+
+          ((>= my-len 4)
+           (let* ((bid (closest-bid suit last-bid))
+                  (need (+ my-len (if already-shown 1 0)))
+                  (level (first bid))
+                  (hcp-thresh (cond ((= level 1) 18)
+                                    ((= level 2) 21)
+                                    (t 24)))
+                  (min-hcp-needed (- hcp-thresh (or partner-min 0))))
+             (push (cons bid `(and (>= hcp ,min-hcp-needed)
+                                   (>= ,suit ,need)))
+                   bid-scheme)
+             (let ((bid (jump-bid suit last-bid 1)))
+                (if (< (first bid) 4)
+                    (push (cons bid `(and (> hcp 5) (>= ,(mksym suit "power") 5)
+                                          (or (> losers 5) (< hcp 11))))
+                          bid-scheme))))))))
+
+    ;; Cue-bids
+    (when (and last-opp-suit (not our))
+       (push (cons (jump-bid last-opp-suit last-bid 0)
+                   (cond ((not partner-long-suits) nil)
+                         ((= (length partner-long-suits) 1)
+                            (let ((longer (first partner-long-suits)))
+                               `(and (>= hcp ,(- (game-hcp (first longer)) partner-min 2))
+                                     (>= ,(first longer) ,(- 8 (second longer))))))
+                         (t `(or ,@(loop for longer in partner-long-suits
+                                         collect `(and (>= hcp ,(- (game-hcp (first longer)) partner-min 2))
+                                                       (>= ,(first longer) ,(- 8 (second longer)))))))))
+              bid-scheme))
+
+                   
+    ;; NT bids
+    (when opp-suits
+      (let ((stopper-rules (mapcar (lambda (s)
+                                     `(>= ,(mksym s "stop") 5))
+                                   opp-suits)))
+        (when (>= (bid-jump last-bid '(3 NT)) 0)
+           (push `((3 NT) . (and (>= hcp ,(- 25 (or partner-min 0)))
+                                 ,@stopper-rules))
+                 bid-scheme))
+        (when (>= (bid-jump last-bid '(2 NT)) 0)
+           (push `((2 NT) . (and (>= hcp ,(- 22 (or partner-min 0)))
+                                 ,@stopper-rules))
+                 bid-scheme))))
+
+    ;; Takeout double (once)
+    (when (and (not our) opp-suits 
+               (neq (third last-bid) 'x)
+               (find last-bid opp-bids :test #'equal))
+      (let ((double-rules (if (not our)
+                              (append (loop for s in opp-suits
+                                            collect `(<= ,(suitsym (suitno s)) 3))
+                                      (loop for s in '(C D H S)
+                                            unless (find s opp-suits)
+                                            collect `(>= ,s 3))))))
+        (push `(X . (and (>= hcp 10) ,@double-rules)) bid-scheme)))
+
+
+    (merge-bid-rules (reverse bid-scheme) last-bid opp-bids)))
+
+(test (choose-bid (str2hand "♣ AJ95 ♦ 72 ♥ Q107 ♠ A1095")
+                  (competitive-further-bid '(and (>= hcp 6) (>= S 4))
+                                           '(and (>= hcp 12) (<= hcp 22) (>= D 5))
+                                           '(2 D)
+                                           '((1 H))))
+      '(2 NT)
+      equal)
+
+(test (choose-bid (str2hand "♣ KQJ102 ♦ 7 ♥ A1095 ♠ 43")
+                  (competitive-further-bid '(and (>= hcp 6) (>= H 4))
+                                           '(and (>= hcp 12) (<= hcp 17) (>= C 3))
+                                           '(2 H)
+                                           '((1 D))))
+      '(3 C)
+      equal)
+
+(test (choose-bid (str2hand "♣ 72 ♦ KQJ10 ♥ A1095 ♠ 43")
+                  (competitive-further-bid nil
+                                           '(and (>= hcp 15) (<= HCP 17))
+                                           '(2 H)
+                                           '((2 H))))
+      '(3 NT)
+      equal)
+
+;; Merge a double with the preceding bid so that last-bid keeps the (level suit) form
+;; and we still know a double occurred: (1 S) + X  =>  (1 S X)
+(defun merge-double (bids)
+    (labels ((skip-nil (lst)
+                (cond ((not lst) lst)
+                      ((not (car lst)) (skip-nil (cdr lst)))
+                      (t lst)))
+             (self (rev &optional acc)
+               (cond ((not rev) acc)
+                     ((eq (car rev) 'X)
+                        (self (cdr rev) (cons `(,@(car (skip-nil (cdr rev))) x) acc)))
+                     (t (self (cdr rev) (cons (car rev) acc))))))
+      (self (reverse bids))))
+
+(test (merge-double '((1 S) (2 H) (2 S) NIL NIL X))
+      '((1 S) (2 H) (2 S) NIL NIL (2 S X))
+      equal)
+
 ;; Bidding scheme selection based on bidding sequence (history-aware).
 (defun bidding-scheme-for (bids meanings)
-    (cond ((equal bids '((1 NT))) (nt-responses 1))
-          ((equal bids '((2 NT))) (nt-responses 2))
-          ((and (= (length bids) 1) (eq (seektree '(0 0) bids) 1))
-              (basic-responses (first bids)))
-          ((equal bids '((2 C))) 2c-responses)
-          ((equal bids '((1 NT) (2 C)))
-              (stayman-responses 1))
-          ((equal bids '((2 NT) (2 C)))
-              (stayman-responses 2))
-          (t (further-bid (first meanings) (second meanings) (car (last bids))))))
+    (let* ((merged-bids (merge-double bids))
+           (opps-bids (loop for i from (- (length merged-bids) 1) downto 0 by 2
+                            collect (nth i merged-bids)))
+           (our-bids (loop for i from (- (length merged-bids) 2) downto 0 by 2
+                            collect (nth i merged-bids))))
+      (if (some #'identity opps-bids)
+          ;; competitive first overcall case
+          (let ((opp-bids (remove nil (loop for i from (- (length merged-bids) 1) downto 0 by 2
+                                                  collect (nth i merged-bids))))
+                (last-bid (car (last (remove nil merged-bids)))))
+            (cond ((and (not (filter #'identity our-bids)) (<= (length our-bids) 3))
+                     (simple-overcall last-bid opp-bids))
+                  ((filter #'identity our-bids)
+                    (competitive-further-bid (first meanings) (third meanings) last-bid opp-bids))))
+          ;; Our one sided bidding case:
+          (let ((active-bids (remove nil merged-bids))
+                (our (nth 0 meanings))
+                (partner (nth 2 meanings)))
+            (cond ((not active-bids) openings)
+                  ((equal active-bids '((1 NT))) (nt-responses 1))
+                  ((equal active-bids '((2 NT))) (nt-responses 2))
+                  ((and (= (length active-bids) 1) (eq (seektree '(0 0) active-bids) 1))
+                      (basic-responses (first active-bids)))
+                  ((equal active-bids '((2 C))) 2c-responses)
+                  ((equal active-bids '((1 NT) (2 C)))
+                      (stayman-responses 1))
+                  ((equal active-bids '((2 NT) (2 C)))
+                      (stayman-responses 2))
+                  (t (further-bid our partner (car (last active-bids)))))))))
 
 ;; Simple bidding state machine (bot vs. empty seats).
 ;; - deal: four hands (N,E,S,W)
 ;; - bids: last bidding sequence
-;; - meanings: interpretation of the last call
-;; - bid-scheme: current table (openings/responses/further-bid)
+;; - meanings: interpretations of calls per seat
 (defclass bidding ()
     ((deal :initarg :deal)
      (bids :initform nil)
-     (meanings :initform (list nil nil))
-     (bid-scheme :initform openings)))
+     (meanings :initform (list nil nil nil nil))))
 
 (defmethod print-object((this bidding) out)
     (with-slots (meanings bids) this
@@ -878,25 +1178,16 @@
 ;; - Rotate the deal (roll), update history and meanings.
 ;; - Choose the next response scheme based on the call (2C/NT/1x/else->further-bid).
 (defmethod next ((this bidding))
-    (with-slots (deal bids meanings bid-scheme) this
-        (labels ((apply-bid (call)
+    (with-slots (deal bids meanings) this
+        (let* ((bid-scheme (bidding-scheme-for bids meanings))
+               (call (choose-bid (first deal)  bid-scheme)))
                    (setf bids (append bids (list call)))
-                   (when call
-                     (let ((our-shape (first meanings))
-                           (partner-shape (second meanings))
-                           (bid-meaning (assoc call bid-scheme)))
-                       (setf meanings (list partner-shape
-                                            (merge-shapes our-shape (cdr bid-meaning))))
-                       (setf bid-scheme (bidding-scheme-for (remove nil bids) meanings))))
+                   (let-from* meanings (our-shape lho-shape partner-shape rho-shape)
+                      (setf meanings (list lho-shape partner-shape rho-shape
+                                           (merge-shapes our-shape (cdr (assoc call bid-scheme))))))
                    (setf deal (roll -1 deal))
-                   call))
-          (let* ((last-call (car (last bids)))
-                 (third-ago (and (>= (length bids) 3)
-                                 (nth (- (length bids) 3) bids)))
-                 (auto-pass (or last-call third-ago)))
-            (if auto-pass
-                (apply-bid nil)
-                (apply-bid (choose-bid (first deal) bid-scheme)))))))
+                   call)))
+
 
 (defmethod drain ((this bidding) &optional acc)
     (let ((res (next this)))
@@ -921,5 +1212,6 @@
                                 (str2hand "E: ♠ K62 ♥ AJ7654 ♦ A ♣ 9872")
                                 (str2hand "S: ♠ J853 ♥ KQ10 ♦ 987 ♣ AJ6")
                                 (str2hand "W: ♠ 4 ♥ 98 ♦ 65432 ♣ Q543"))))
-      '((1 S) nil (3 S) nil (4 S) nil nil nil)
+      '((1 S) (2 H) (3 H) NIL (4 S) NIL NIL NIL)
       equal)
+

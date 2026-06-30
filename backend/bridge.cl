@@ -549,6 +549,8 @@
                            '(2 3 4 5 6 7 8 9 10 J Q K A))))
      (and suit rank (list suit rank))))
 
+(defun neq (x y) (not (eq x y)))
+
 (defun cardstr (c)
     (format nil "~A~A" (nth (suitno (first c)) '("♣" "♦" "♥" "♠"))
                        (nth (second c) '(2 3 4 5 6 7 8 9 10 J Q K A))))
