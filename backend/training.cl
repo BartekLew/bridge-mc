@@ -1,3 +1,5 @@
+(load "bidding.cl")
+
 (defvar full-random (make-instance 'deal))
 
 (defun better-score (a b)
@@ -55,6 +57,42 @@
                                   (append acc (list trick)))))
             (append acc (list trick)))))
 
+(defun skip (lst)
+    (if (or (not lst) (car lst)) lst (skip (cdr lst))))
+
+
+(defun who-plays (bidding)
+    (labels ((player (rev-bids)
+                (let* ((partnership (mod (- (length rev-bids) 1) 2))
+                       (pbids (loop for bid in (reverse rev-bids)
+                                    for i from 0
+                                    append (if (= (mod i 2) partnership) (list bid) nil)))
+                       (suit (second (first rev-bids)))
+                       (first-in-suit (fold (lambda (acc bid)
+                                                (if acc acc
+                                                    (if (eq (second (second bid)) suit) (first bid) nil)))
+                                            nil
+                                            (zip-id pbids))))
+                   (+ (* 2 first-in-suit) partnership))))
+                   
+     (let ((last-bids (skip (reverse bidding))))
+        (cond ((not last-bids) nil)
+              ((eq (car last-bids) 'x)
+                  (let ((doubled (skip (cdr last-bids))))
+                    (player doubled)))
+              (t (player last-bids))))))
+                     
+(test (who-plays '(nil (1 S) nil nil nil)) 1 eq)
+
+(test (who-plays '((1 C) nil (1 D) (2 C) nil nil nil)) 3 eq)
+
+(test (who-plays '(nil nil (1 S) (1 NT) nil nil x))
+      3 eq)
+
+(test (who-plays '(nil (1 H) (1 S) (2 H) x nil nil nil)) 1 eq)
+    
+(defun summarized-outcome (label trump outcome hands)
+    (format t "~A: ~A~%~A~%" label outcome (apply (curry #'summarize-outcome outcome trump) hands)))
 
 (defparameter *deal* nil)
 (defun play-training (&key deal roll trump defender-hand)
@@ -69,25 +107,20 @@
                                         (format t "dummy: ~A~%" (third hands))
                                         card))
                                 (t (format t "dummy: ~a, trump: ~A~%" (third hands) (suit-uc suit))))))
-                  (format t "you: ~A~%" (new-outcome (manual-play suit lead
-                                                     (roll -1 hands) defender-hand)))
-                  (format t "cpu: ~A~%" outcome))))
+                  (summarized-outcome "you" suit 
+                        (new-outcome (manual-play suit lead (roll -1 hands) defender-hand))
+                        hands)
+                  (summarized-outcome "cpu" suit outcome hands)
+                  (format t "hands: ~A~%" hands))))
         (if (and deal roll)
             (let ((ref (apply (curry #'play-deal trump) (roll roll deal))))
                 (play trump (roll (or roll 0) deal) ref))
             (let* ((hands (or deal (build full-random)))
-                   (nssuit (apply #'longest-suit hands))
-                   (wesuit (apply #'longest-suit (roll 1 hands)))
-                   (nsnt (apply (curry #'play-deal nil) hands))
-                   (went (apply (curry #'play-deal nil) (roll 1 hands)))
-                   (nssc (apply (curry #'play-deal nssuit) hands))
-                   (wesc (apply (curry #'play-deal wesuit) (roll 1 hands)))
-                   (contract (fold (lambda (acc val)
-                                      (if (or (not acc) (better-score  (third val) (third acc)))
-                                          val acc))
-                                   nil
-                                   (list (list hands nssuit nssc) (list hands nil nsnt) 
-                                         (list (roll 1 hands) wesuit wesc) (list (roll 1 hands) nil went)))))
+                   (bidding (drain (make-instance 'bidding :deal hands))))
                 (if (not deal) (setf *deal* hands))
-                (play (second contract) (first contract) (third contract))))))
-                 
+                (if (find-if #'id bidding)
+                    (let ((suit (second (first (skip (reverse bidding)))))
+                          (rhands (roll (- (who-plays bidding)) hands)))
+                      (format t "bidding: ~a~%" bidding)
+                      (play suit rhands (apply (curry #'play-deal suit) rhands))))))))
+

@@ -146,12 +146,15 @@
                                                                     (- wtricks 5))
                                                           :double (>= wscore 300))))
                `(:score (,wscore ,dscore)
-                 :power ,(mapcar (lambda* (suit declarer tricks outcome)
+                 :power ,(mapcar (lambda* (roll suit declarer tricks outcome)
                                     `(:trump ,(suitstr suit)
                                       :declarer ,declarer
                                       :score ,tricks
-                                      :tricks ,(mapcar (curry #'mapcar #'cardstr) (tricks outcome))))
-                                 results)))))))
+                                      :tricks ,(mapcar (curry #'mapcar #'cardstr) (tricks outcome))
+                                      :comment ,(format nil "~A"
+                                                    (apply (curry #'summarize-outcome outcome suit)
+                                                           (roll roll hands)))))
+                                 (mapcar #'cons (list 0 1) results))))))))
 
 (defclass result ()
     ((success :reader ok?)

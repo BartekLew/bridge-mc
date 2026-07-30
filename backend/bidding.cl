@@ -328,12 +328,13 @@
                                 (not ,fit))))
                (if (eq (suitsym open-suit) 'C)
                    `(((2 C) . (and (>= hcp 6) (<= hcp 9) (>= C 5) ,@no-biddable-4)))
-                   `(((2 C) . (and (>= hcp 11) ,@no-biddable-4 ,@no-lower-5
+                   `(((2 C) . (and (>= hcp 11) ,@no-biddable-4
+                                               ,@(filter (lambda (c) (not (eq (second c) 'c)))
+                                                         no-lower-5)
                                    (or (not ,fit) (>= hcp 15))))))
                `(((2 ,(suitsym open-suit)) . (and (>= hcp 6) (<= hcp 9) ,fit 
                                                   ,@no-biddable-4))
-                 ((3 ,(suitsym open-suit)) . (and (>= hcp 10) (<= hcp 12) ,fit 
-                                                  ,@no-biddable-4 ,@no-lower-5)))
+                 ((3 ,(suitsym open-suit)) . (and (>= hcp 10) (<= hcp 12) ,fit ,@no-biddable-4)))
                (if (>= open-suit 2)
                    `(((4 ,(suitsym open-suit)) . (and (>= hcp 13) (<= hcp 15) ,fit))))
                (loop for suit-no in (filter (curry #'> open-suit) '(1 2 3))
@@ -346,6 +347,9 @@
 (test (choose-bid (str2hand "♣ 72 ♦ K854 ♥ K653 ♠ AK8") (basic-responses '(1 S))) '(4 S) equal)
 (test (choose-bid (str2hand "♣ 96 ♦ AK7654 ♥ K7 ♠ KQ5") (basic-responses '(1 C))) '(1 D) equal)
 (test (choose-bid (str2hand "♣ 96 ♦ AK765 ♥ K7 ♠ KQ52") (basic-responses '(1 H))) '(1 S) equal)
+(test (choose-bid (str2hand "♠ KJ8 ♥ K ♦ 975 ♣ AJ10532") (basic-responses '(1 H))) '(2 C) equal)
+(test (choose-bid (str2hand "♠ J65 ♥ K75 ♦ K8 ♣ QJ1065") (basic-responses '(1 H))) '(3 H) equal)
+
 
 ;; Inference and combination section:
 ;; From this point we start extracting and combining constraints inferred from both our and partner's
@@ -534,7 +538,7 @@
       (letcar bid-meaning
           (if (find head '(AND OR))
               (filter #'id (mapcar fn tail))
-              (apply fn bid-meaning)))))
+              (funcall fn bid-meaning)))))
 
 ;; Extract useful metadata from shape definitions:
 ;; - max-hcp/min-hcp: strength bounds
@@ -690,18 +694,18 @@
                       (let* ((hcp (+ 25 (* 3 (- level 4)) (if (not (eq suit 'nt) )0 3)))
                              (losers (- 7 level 1)))
                          `(,(biddef (list level suit)
-                                         (- hcp min-hcp) nil
-                                         nil (+ losers (hcp-tricks min-hcp))
+                                         (- hcp (or min-hcp 0)) nil
+                                         nil (+ losers (hcp-tricks (or min-hcp 0)))
                                          (if suit length))
                            ,@(if (and (or (< level 6) (> (suitno* suit) 1))
-                                      (or (not max-hcp) (> (- max-hcp min-hcp) 1)))
+                                      (or (not max-hcp) (> (- max-hcp (or min-hcp 0)) 1)))
                                  `(,(biddef (list (- level (if (and (eq suit 'nt)
                                                                     (= level 6))
                                                                2 1))
                                                   suit)
-                                            (- hcp min-hcp 2) nil
+                                            (- hcp (or min-hcp 0) 2) nil
                                             nil
-                                            (+ losers (hcp-tricks min-hcp) 1)
+                                            (+ losers (hcp-tricks (or min-hcp 0)) 1)
                                             (if suit length))))))))
                (propagate-from-previous
                    (if (eq suit 'nt) (lambda (entry) (min-hcp (cdr entry)))
@@ -920,14 +924,16 @@
        ;; new suit overcalls (non-jump, legal)
        (loop for s in '(C D H S)
              for bid = (jump-bid s last-bid 0)
-             when (and (>= (bid-jump last-bid bid) 0)
+             when (and bid
+                       (>= (bid-jump last-bid bid) 0)
                        (not (find s opp-suits :test #'eq)))
              collect `(,bid . (and (>= hcp 8) (< hcp 18) (>= ,(suitsym (suitno s)) 5)
                                    (or (>= ,(mksym s "power") 4) (>= hcp 12)))))
        ;; jump overcalls (weak)
        (loop for s in '(C D H S)
              for bid = (jump-bid s last-bid 1)
-             when (and (> (bid-jump last-bid bid) 0)
+             when (and bid
+                       (> (bid-jump last-bid bid) 0)
                        (not (find s opp-suits :test #'eq)))
              collect `(,bid . (and (> hcp 5) (>= ,(mksym s "power") 5)
                                    (or (> losers 5) (< hcp 11))
@@ -954,8 +960,8 @@
 
 (defun level-bid (partner-min suit len last-bid)
     (let ((bid (jump-bid suit last-bid 0)))
-        (if bid (let* ((min-hcp (- (+ 13 (* 3 (first bid))) partner-min))
-                       (max-hcp (- (game-hcp suit) partner-min 3)))
+        (if bid (let* ((min-hcp (- (+ 13 (* 3 (first bid))) (or partner-min 0)))
+                       (max-hcp (- (game-hcp suit) (or partner-min 0) 3)))
                    (if (>= max-hcp min-hcp)
                       (cons bid `(and (>= hcp ,min-hcp) (<= hcp ,max-hcp) (>= ,suit ,len))))))))
 
@@ -1188,6 +1194,15 @@
                    (setf deal (roll -1 deal))
                    call)))
 
+(defmethod next-bid ((this bidding) call)
+    (with-slots (deal bids meanings) this
+        (let* ((bid-scheme (bidding-scheme-for bids meanings)))
+                (setf bids (append bids (list call)))
+                (let-from* meanings (our-shape lho-shape partner-shape rho-shape)
+                    (setf meanings (list lho-shape partner-shape rho-shape
+                                        (merge-shapes our-shape (cdr (assoc call bid-scheme :test #'equal))))))
+                (setf deal (roll -1 deal))
+                call)))
 
 (defmethod drain ((this bidding) &optional acc)
     (let ((res (next this)))
@@ -1214,4 +1229,3 @@
                                 (str2hand "W: ♠ 4 ♥ 98 ♦ 65432 ♣ Q543"))))
       '((1 S) (2 H) (3 H) NIL (4 S) NIL NIL NIL)
       equal)
-

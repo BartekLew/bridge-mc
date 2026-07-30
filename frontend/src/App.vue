@@ -408,7 +408,12 @@ async function runSimulation() {
                :key="key"
                class="text-center">
               <b>{{key}}</b>:
-              <pre v-if="key === 'TRICKS'">{{
+              <div v-if="key === 'COMMENT'">
+                <p v-for="par in value.split('\n')" class="mt-2">
+                    {{ par }}
+                </p>
+              </div>
+              <pre v-else-if="key === 'TRICKS'">{{
                  value.map((trick) => trick.join(" "))
                       .join("\n") }}
               </pre>

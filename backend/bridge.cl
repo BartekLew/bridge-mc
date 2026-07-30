@@ -523,6 +523,16 @@
       '((a b c) () ())
       equal)
 
+(test (getfork '((1 H) NIL (1 S) NIL (2 C))
+               '((1 H) NIL NIL (1 S) NIL))
+      '(((1 H) nil) ((1 S) nil (2 C)) (nil (1 S) nil))
+      equal)
+
+(test (getfork '((1 H) (1 S) NIL (2 C))
+               '((1 H) NIL NIL (1 S) NIL))
+      '(((1 H)) ((1 S) nil (2 C)) (nil nil (1 S) nil))
+      equal)
+
 (defmacro += (var val)
     `(setf ,var (+ ,var ,val)))
 
@@ -1577,7 +1587,8 @@
      (high :reader high)
      (winner :reader winner)
      (cards :reader cards)
-     (remaining :reader remaining)))
+     (remaining :reader remaining)
+     (finesses :initform nil :reader finesses)))
 
 (defmethod initialize-instance ((self trick) &key suit trump high winner remaining)
     (setf (slot-value self 'high) (if (listp high) (or high (list (normsuit suit) -1))
@@ -1586,6 +1597,7 @@
     (setf (slot-value self 'trump) (normsuit trump))
     (setf (slot-value self 'winner) (or winner -1))
     (setf (slot-value self 'cards) nil)
+    (setf (slot-value self 'finesses) nil)
     (setf (slot-value self 'remaining) remaining))
 
 (defmethod print-object ((self trick) out)
@@ -1941,6 +1953,20 @@ W: ♣ A1087 ♦ KQ5 ♥ 762 ♠ Q102"))
 (defun lastcar (x)
     (car (last x)))
 
+; Wraps a (play h1 suit ...) call whose chooser was picked based on h2's
+; holding (i.e. an actual finesse decision). If the play succeeds and h1
+; still holds a higher card of that suit in reserve, records the card on
+; trick - a candidate finesse. Whether it actually skipped over a live
+; opponent honor (as opposed to a card already played or held by h1's own
+; partner) can only be determined later, with full-deal knowledge, in
+; summarize-outcome.
+(defun finesse-attempt (trick h1 suit pred)
+    (let* ((h1-cards (nth suit (suits h1)))
+           (result (play h1 suit (curry #'take-match pred))))
+        (if (and result (find-if (curry #'< (second (first result))) h1-cards))
+            (push (first result) (slot-value trick 'finesses)))
+        result))
+
 (defun finesse-if-possible (trick h1 h2)
     (with-slots (high suit trump) trick
         (let-from! (and (not (winnerp? trick)) high) (hsuit hrank)
@@ -1949,14 +1975,14 @@ W: ♣ A1087 ♦ KQ5 ♥ 762 ♠ Q102"))
                                     (if (and (nth suit (suits h2)) (not (eq suit trump)))
                                         (play h1 trump (curry #'take-match (curry #'< hrank)))
                                         (let ((h2-max (or (apply #'max? (nth trump (suits h2))) -1)))
-                                            (play h1 trump (curry #'take-match (andf (curry #'< hrank)
-                                                                                     (curry #'< h2-max))))))
+                                            (finesse-attempt trick h1 trump (andf (curry #'< hrank)
+                                                                                  (curry #'< h2-max)))))
                                     (play h1 (weak-suit h1 trick) #'lowest-card)))
                              ((and hsuit (eq hsuit suit))
                                 (or (if (nth suit (suits h2))
                                         (let ((h2-max (apply #'max? (nth suit (suits h2)))))
-                                           (or (play h1 suit (curry #'take-match (andf (curry #'< h2-max)
-                                                                                       (curry #'< hrank))))
+                                           (or (finesse-attempt trick h1 suit (andf (curry #'< h2-max)
+                                                                                    (curry #'< hrank)))
                                                (play h1 suit (curry #'take-match (curry #'< hrank)))))
                                         (play h1 suit (curry #'take-match (curry #'< hrank))))
                                     (play h1 suit #'lowest-card)
@@ -1964,20 +1990,20 @@ W: ♣ A1087 ♦ KQ5 ♥ 762 ♠ Q102"))
                                     (if (and trump (not (nth suit (suits h2)))
                                              (nth trump (suits h2)))
                                         (let ((h2-max (apply #'max (nth trump (suits h2)))))
-                                            (play h1 trump (curry #'take-match (curry #'< h2-max))))
+                                            (finesse-attempt trick h1 trump (curry #'< h2-max)))
                                         (if (and trump (not (winnerp? trick)))
                                             (play h1 trump #'lowest-card)))
 
                                     (play h1 (weak-suit h1 trick) #'lowest-card)))
                              (t (or (if (nth suit (suits h2))
                                         (let ((h2-max (apply #'max (nth suit (suits h2)))))
-                                           (play h1 suit (curry #'take-match (curry #'< h2-max)))))
+                                           (finesse-attempt trick h1 suit (curry #'< h2-max))))
                                     (play h1 suit #'lowest-card)
 
                                     (if (and trump (not (nth suit (suits h2)))
                                              (nth trump (suits h2)))
                                         (let ((h2-max (apply #'max (nth trump (suits h2)))))
-                                            (play h1 trump (curry #'take-match (curry #'< h2-max))))
+                                            (finesse-attempt trick h1 trump (curry #'< h2-max)))
                                         (if (and trump (not (winnerp? trick)))
                                             (play h1 trump #'lowest-card)))
 
@@ -2230,6 +2256,7 @@ W: ♣ A1087 ♦ KQ5 ♥ 762 ♠ Q102"))
    ((tricks :initarg :tricks :initform nil :reader tricks)
     (winners :initarg :winners :initform nil :reader winners)
     (winner-nos :initarg :winner-nos :initform nil :reader winner-nos)
+    (finesses :initarg :finesses :initform nil :reader finesses)
     (score :initform '(0 0) :initarg :score :reader score)
     (roll :initform 0 :initarg :roll)
     (remaining :initarg :remaining :reader remaining)))
@@ -2244,15 +2271,17 @@ W: ♣ A1087 ♦ KQ5 ♥ 762 ♠ Q102"))
     (make-instance 'outcome :tricks (list (cards trick))
                             :winners (list (nth (winner trick) (cards trick)))
                             :winner-nos (list (winner trick))
+                            :finesses (list (reverse (finesses trick)))
                             :score (if (eq (mod (winner trick) 2) 0) '(1 0) '(0 1))
                             :roll (winner trick)
                             :remaining (roll (- (winner trick)) (remaining trick))))
 
 (defmethod add-outcome ((self outcome) (other outcome))
-    (with-slots (tricks score winners winner-nos roll remaining) self
+    (with-slots (tricks score winners winner-nos finesses roll remaining) self
         (setf tricks (append tricks (tricks other)))
         (setf winners (append winners (winners other)))
         (setf winner-nos (append winner-nos (winner-nos other)))
+        (setf finesses (append finesses (finesses other)))
         (setf score (loop for a in score
                           for b in (if (eq (mod roll 2) 1) (reverse (score other))
                                                            (score other))
@@ -2262,10 +2291,11 @@ W: ♣ A1087 ♦ KQ5 ♥ 762 ♠ Q102"))
     self)
 
 (defmethod add-outcome* ((self outcome) (other outcome))
-    (with-slots (tricks score winners winner-nos roll remaining) self
+    (with-slots (tricks score winners winner-nos finesses roll remaining) self
         (make-instance 'outcome :tricks (append tricks (tricks other))
                                 :winners (append winners (winners other))
                                 :winner-nos (append winner-nos (winner-nos other))
+                                :finesses (append finesses (finesses other))
                                 :score (loop for a in score
                                              for b in (if (eq (mod roll 2) 1) (reverse (score other))
                                                                               (score other))
@@ -3000,6 +3030,128 @@ W: ♣ A1087 ♦ KQ5 ♥ 762 ♠ Q102"))
 (defun play-deal (trump declarer left dummy right)
     (play-outcome (make-instance 'deal-play :hands (list declarer left dummy right)
                                             :trump (if (not (eq trump 'nt)) trump))))
+
+; Identifies which of the four ORIGINAL starting hands a played card came
+; from. Cards are unique across a deal, so this is unambiguous.
+(defun card-owner (card declarer left dummy right)
+    (let-from* card (s r)
+        (cond ((find r (nth s (suits declarer))) :declarer)
+              ((find r (nth s (suits left))) :lho)
+              ((find r (nth s (suits dummy))) :dummy)
+              ((find r (nth s (suits right))) :rho))))
+
+(defun seat-name (seat)
+    (case seat
+        (:declarer "Declarer")
+        (:lho "LHO")
+        (:dummy "Dummy")
+        (:rho "RHO")))
+
+(defun partnership (seat)
+    (if (member seat '(:declarer :dummy)) '(:declarer :dummy) '(:lho :rho)))
+
+; Honor ranks (10 through A) of suit, ranked above played-rank, that are
+; still live (not among already-played) and belong to the partnership
+; OPPOSING owner - i.e. the cards a finesse of played-rank genuinely bets
+; against. A card sitting with owner's own partner, or already played in an
+; earlier trick, doesn't count.
+(defun live-opponent-honors (suit played-rank owner already-played declarer left dummy right)
+    (let ((opponents (set-difference '(:declarer :lho :dummy :rho) (partnership owner)))
+          (played-ranks (mapcar #'second (filter (lambda (c) (eq (first c) suit)) already-played))))
+        (loop for r from (+ played-rank 1) to 12
+              when (and (>= r 8)
+                        (not (find r played-ranks))
+                        (member (card-owner (list suit r) declarer left dummy right) opponents))
+              collect (list suit r))))
+
+; Turns a flat list of (suit rank) cards into the 4-suits-in-clubs-order
+; shape print-hand expects.
+(defun cards-by-suit (cards)
+    (loop for s from 0 to 3
+          collect (mapcar #'second (filter (lambda (c) (eq (first c) s)) cards))))
+
+; For the given side (a list of seats, e.g. '(:declarer :dummy)), how many
+; ruff tricks it won, grouped by the suit that was LED (i.e. ruffed away).
+(defun ruffs-by-suit (side led-suits winners trump-suit declarer left dummy right)
+    (let ((ruffed-suits (loop for led in led-suits
+                              for w in winners
+                              when (and trump-suit (eq (first w) trump-suit) (not (eq led trump-suit))
+                                        (member (card-owner w declarer left dummy right) side))
+                              collect led)))
+        (loop for s from 0 to 3
+              for n = (count s ruffed-suits)
+              when (> n 0)
+              collect (cons s n))))
+
+(defclass deal-summary ()
+    ((trump :initarg :trump :reader summary-trump)
+     (declarer-tricks :initarg :declarer-tricks :reader declarer-tricks)
+     (defense-tricks :initarg :defense-tricks :reader defense-tricks)
+     (declarer-trick-cards :initarg :declarer-trick-cards :reader declarer-trick-cards)
+     (defense-trick-cards :initarg :defense-trick-cards :reader defense-trick-cards)
+     (declarer-ruffs :initarg :declarer-ruffs :reader declarer-ruffs)
+     (defense-ruffs :initarg :defense-ruffs :reader defense-ruffs)
+     (finesses :initarg :finesses :initform nil :reader finesses)))
+
+(defmethod print-object ((self deal-summary) out)
+    (with-slots (trump declarer-tricks defense-tricks declarer-trick-cards defense-trick-cards
+                 declarer-ruffs defense-ruffs finesses) self
+        (format out "Trump: ~A~%" (suit-uc trump))
+        (format out "Declarer's side took ~A tricks, the defense took ~A.~%" declarer-tricks defense-tricks)
+        (format out "Declarer tricks: ~A~%" (print-hand (cards-by-suit declarer-trick-cards)))
+        (format out "Defender tricks: ~A~%" (print-hand (cards-by-suit defense-trick-cards)))
+        (if declarer-ruffs
+            (format out "Declarer ruffs ~{~A~^, ~}.~%"
+                    (loop for pair in declarer-ruffs
+                          collect (format nil "~A in ~A" (cdr pair) (suit-uc (car pair)))))
+            (format out "No declarer ruffs.~%"))
+        (if defense-ruffs
+            (format out "Defender ruffs ~{~A~^, ~}.~%"
+                    (loop for pair in defense-ruffs
+                          collect (format nil "~A in ~A" (cdr pair) (suit-uc (car pair)))))
+            (format out "No defender ruffs.~%"))
+        (if finesses
+            (format out "Finesses: ~{~A~^, ~}.~%"
+                    (loop for entry in finesses
+                          collect (format nil "~A finessed the ~A against ~{~A~^ and ~} (depth ~A)"
+                                          (seat-name (first entry))
+                                          (cardstr (second entry))
+                                          (mapcar #'cardstr (fourth entry))
+                                          (third entry))))
+            (format out "No finesses were taken.~%"))))
+
+(defun summarize-outcome (outcome trump declarer left dummy right)
+    (let* ((tricks (tricks outcome))
+           (winners (winners outcome))
+           (trump-suit (normsuit trump))
+           (led-suits (mapcar #'caar tricks))
+           (finesse-events (loop for i from 0
+                                 for trick in tricks
+                                 for trick-finesses in (finesses outcome)
+                                 append (loop for f in trick-finesses
+                                             for pos = (position f trick :test #'equal)
+                                             for played-before = (append (apply #'append (subseq tricks 0 i))
+                                                                         (subseq trick 0 pos))
+                                             for owner = (card-owner f declarer left dummy right)
+                                             for against = (live-opponent-honors (first f) (second f) owner
+                                                                                 played-before declarer left dummy right)
+                                             when against
+                                             collect (list owner f (length against) against)))))
+        (make-instance 'deal-summary
+                       :trump trump-suit
+                       :declarer-tricks (second (score outcome))
+                       :defense-tricks (first (score outcome))
+                       :declarer-trick-cards (filter (lambda (w) (member (card-owner w declarer left dummy right)
+                                                                         '(:declarer :dummy)))
+                                                     winners)
+                       :defense-trick-cards (filter (lambda (w) (member (card-owner w declarer left dummy right)
+                                                                        '(:lho :rho)))
+                                                    winners)
+                       :declarer-ruffs (ruffs-by-suit '(:declarer :dummy) led-suits winners trump-suit
+                                                      declarer left dummy right)
+                       :defense-ruffs (ruffs-by-suit '(:lho :rho) led-suits winners trump-suit
+                                                     declarer left dummy right)
+                       :finesses finesse-events)))
 
 ;(test (tricks (peek (play-deal nil (str2hand "♣ AKQ7 ♦ 10 ♥ QJ632 ♠ 832")
 ;                                   (str2hand "♣ J54 ♦ KJ82 ♥ 8 ♠ KQJ95")
