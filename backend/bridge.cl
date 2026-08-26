@@ -375,6 +375,21 @@
     (if (not lst) val
         (fold fn (apply fn (list val (car lst))) (cdr lst))))
 
+(defun fold-until (join stop? val lst)
+    (if (not lst) val
+        (let ((next (apply join (list val (car lst)))))
+            (if (funcall stop? next) next
+                (fold-until join stop? next (cdr lst))))))
+
+(defun mapleaves (fn tree)
+    (cond ((not tree) nil)
+          ((listp tree) (mapcar (curry #'mapleaves fn) tree))
+          (t (funcall fn tree))))
+
+(test (mapleaves (curry #'+ 1) '(1 (2 3) ((4 5) (6 8))))
+      '(2 (3 4) ((5 6) (7 9)))
+      equal)
+
 (defun unique (lst &key (cmp #'<))
     (reverse (fold (lambda (acc val)
                 (if (equal (car acc) val)
@@ -1693,16 +1708,17 @@
 (defun str2suitno (x)
     (position x '("♣" "♦" "♥" "♠") :test #'equal))
 
+(defun str2ranks (str &optional acc)
+   (if (= (length str) 0)
+       acc
+       (let ((h (char str 0)))
+          (cond ((eq h #\1) (str2ranks (subseq str 2) (cons 8 acc)))
+                ((eq h #\space) acc)
+                ((str2ranks (subseq str 1)
+                            (cons (position h '(#\2 #\3 #\4 #\5 #\6 #\7 #\8 #\9 #\1 #\J #\Q #\K #\A)) acc)))))))
+
 (defun str2hand (str)
-    (labels ((str2ranks (str &optional acc)
-                (if (= (length str) 0)
-                    acc
-                    (let ((h (char str 0)))
-                      (cond ((eq h #\1) (str2ranks (subseq str 2) (cons 8 acc)))
-                            ((eq h #\space) acc)
-                            ((str2ranks (subseq str 1)
-                                        (cons (position h '(#\2 #\3 #\4 #\5 #\6 #\7 #\8 #\9 #\1 #\J #\Q #\K #\A)) acc)))))))
-            (suits (fields &optional (acc '(nil nil nil nil)))
+    (labels ((suits (fields &optional (acc '(nil nil nil nil)))
                 (cond ((not fields) acc)
                       ((str2suitno (second fields)) 
                             (setf (nth (str2suitno (first fields)) acc) nil)
@@ -1967,7 +1983,7 @@ W: ♣ A1087 ♦ KQ5 ♥ 762 ♠ Q102"))
             (push (first result) (slot-value trick 'finesses)))
         result))
 
-(defun finesse-if-possible (trick h1 h2)
+(defun finesse-if-possible (trick h1 h2 &key force-high)
     (with-slots (high suit trump) trick
         (let-from! (and (not (winnerp? trick)) high) (hsuit hrank)
             (let-from! (cond ((and hsuit (eq hsuit trump) (not (eq trump suit)))
@@ -1997,7 +2013,13 @@ W: ♣ A1087 ♦ KQ5 ♥ 762 ♠ Q102"))
                                     (play h1 (weak-suit h1 trick) #'lowest-card)))
                              (t (or (if (nth suit (suits h2))
                                         (let ((h2-max (apply #'max (nth suit (suits h2)))))
-                                           (finesse-attempt trick h1 suit (curry #'< h2-max))))
+                                           (if (or (not (winnerp? trick))
+                                                   force-high
+                                                   (< (second high) h2-max))
+                                              (finesse-attempt trick h1 suit (curry #'< h2-max)))))
+                                    (if force-high (play h1 suit (lambda (cards)
+                                                                    (or (take-higher cards (second high))
+                                                                        (lowest-card cards)))))
                                     (play h1 suit #'lowest-card)
 
                                     (if (and trump (not (nth suit (suits h2)))
@@ -2019,13 +2041,15 @@ W: ♣ A1087 ♦ KQ5 ♥ 762 ♠ Q102"))
 
 (test (as-list (finesse-if-possible (make-instance 'trick :suit 'H :high 8)
                                     (make-instance 'hand := '((4 6) (1) (0 1 2 9 12) (1 2 4 7)))
-                                    (make-instance 'hand := '((2 3 5 7 8 12) (0 3 6 11) (7) (0)))))
+                                    (make-instance 'hand := '((2 3 5 7 8 12) (0 3 6 11) (7) (0)))
+                                    :force-high T))
       '((2 9) ((4 6) (1) (0 1 2 12) (1 2 4 7)))
       equal)
       
 (test (as-list (finesse-if-possible (make-instance 'trick :suit 'H :high 8 :winner 0)
                                     (make-instance 'hand := '((4 6) (1) (0 1 2 9 12) (1 2 4 7)))
-                                    (make-instance 'hand := '((2 3 5 7 8 12) (0 3 6 11) (7) (0)))))
+                                    (make-instance 'hand := '((2 3 5 7 8 12) (0 3 6 11) (7) (0)))
+                                    :force-high T))
       '((2 9) ((4 6) (1) (0 1 2 12) (1 2 4 7)))
       equal)
 
@@ -2095,6 +2119,13 @@ W: ♣ A1087 ♦ KQ5 ♥ 762 ♠ Q102"))
       '((2 11) ((3 10 12) (1 8) (4 6 9) (2 3 10)))
       equal)
                      
+(test (cards (finesse-if-possible (make-trick 'c nil (play trick '(0 12) nil)
+                                                     (play trick '(0 0) nil))
+                                  (str2hand "♠ Q43 ♥ J752 ♦ KQ7 ♣ Q64") 
+                                  (str2hand "♠ AK107 ♥ AQ10 ♦ J84 ♣ 1097")))
+      '((0 12) (0 0) (0 2))
+      equal)
+
 (defun invert-if-needed (lst)
     (letcar lst
         (if head (cons head (roll 2 tail))
@@ -2335,34 +2366,37 @@ W: ♣ A1087 ♦ KQ5 ♥ 762 ♠ Q102"))
               (car outcomes)
               (cdr outcomes))))
 
-(defun simple-trick (trump suit a b c d &key use-highest)
+(defun simple-trick (trump suit a b c d &key use-highest partner-highest)
     (if (> (length (hand-suit a suit)) 0)
         (new-outcome (make-trick suit trump
                         (beat-or-low trick a :use-highest use-highest)
                         (if (beats? d c suit trump) (beat-or-low trick b)
                                                     (finesse-if-possible trick b c))
-                        (finesse-if-possible trick c d)
+                        (finesse-if-possible trick c d :force-high partner-highest)
                         (beat-or-low trick d)))
         (make-instance 'outcome :remaining (list a b c d))))
         
-(defun suit-tricks (trump suit a b c d)
-    (labels ((play-through (&rest hands)
+(defun play-through (trump suit hands &key just-tops)
+    (labels ((self (&rest hands)
                 (apply #'best-outcome
-                    (mapcar (curry #'apply 
-                                   (lambda (top hands)
+                       (mapcar (curry #'apply 
+                                    (lambda (top hands)
                                         (or (do-next (apply #'simple-trick
                                                             `(,trump ,suit ,@hands :use-highest ,top))
-                                                     #'play-through #'play-through)
+                                                     #'self (if (not just-tops) #'self))
                                             (make-instance 'outcome :remaining hands))))
-                            (list-prod '(T NIL) (list hands (roll 2 hands)))))))
-        (fold (lambda (acc trick)
-                 (if (first trick) (cons (cons (second trick) (car acc)) (cdr acc))
-                                   `(nil (,(second trick) ,@(car acc)) ,@(cdr acc))))
-              nil
-              (with-slots (winners winner-nos) (play-through a b c d)
-                  (reverse (loop for player in winner-nos
-                                 for card in winners
-                                 collect (list (= (mod player 2) 0) card)))))))
+                               (list-prod '(T NIL) (list hands (roll 2 hands)))))))
+      (apply #'self hands)))
+
+(defun suit-tricks (trump suit &rest hands)
+    (fold (lambda (acc trick)
+             (if (first trick) (cons (cons (second trick) (car acc)) (cdr acc))
+                               `(nil (,(second trick) ,@(car acc)) ,@(cdr acc))))
+          nil
+          (with-slots (winners winner-nos) (play-through trump suit hands)
+              (reverse (loop for player in winner-nos
+                             for card in winners
+                             collect (list (= (mod player 2) 0) card))))))
 
 (defclass suit-value ()
     ((suit :reader suit)
