@@ -1117,8 +1117,6 @@
                                   for supply in breakdown
                                   collect (deal amount supply))))))
 
-(defun mkhand (x &optional id) (make-instance 'hand := x :id id))
-
 (defmethod rand-hand ((self distgen) cards)
     (let ((x (random (total-weight self))))
         (setf (slot-value self 'cur) nil)
@@ -1688,6 +1686,11 @@
 (defclass hand ()
     ((suits :reader suits)
      (id :reader handid)))
+
+(defun mkhand (x &optional id) (make-instance 'hand := x :id id))
+
+(defun random-deal ()
+    (mapcar (f* #'hand #'mkhand) (deal-all 13 (all-cards))))
 
 (defgeneric pretty-tree (x))
 (defmethod initialize-instance ((self hand) &key = remaining id)

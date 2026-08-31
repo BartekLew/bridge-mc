@@ -24,11 +24,9 @@
 
 ;; TOC:
 ;;  1. Basic helper functions
-;;  2. Alternatives: nondeterministic choice among lazily generated options,
-;;     used to compose naive lines out of the sequences suit-tops etc. offer.
-;;  3. Trickseq: generating one-suit trick sequences. Intentionally, missing
+;;  2. Trickseq: generating one-suit trick sequences. Intentionally, missing
 ;;     cards are replaced with nulls so that they can be handled separately.
-;;  4. Greedy tricks sequence – will create base for further optimization.
+;;  3. Greedy tricks sequence – will create base for further optimization.
 
 
 ;; ====================================================
@@ -63,7 +61,7 @@
 
 (defun suitsplitstr (split)
     (joinstr " " (mapcar (lambda (hand) 
-                            (format nil "~{~A~}" (reverse (mapcar #'rankstr hand))))
+                            (format nil "~{~A~}" (if hand (reverse (mapcar #'rankstr hand)) '("-"))))
                          split)))
 
 (defun best (compare lst)
@@ -77,120 +75,151 @@
 (defun mod+ (denominator &rest operands)
     (mod (apply #'+ operands) denominator))
 
-;; -- lazy streams: a stream is either nil, or (head . thunk) where thunk
-;; is a 0-arg function that, when called, produces the rest of the stream.
-;; Kept minimal on purpose - just enough to make list-prod* lazy.
-(defmacro lcons (head tail)
-    `(cons ,head (lambda () ,tail)))
+(defmacro stack-job (init feed &optional clean-up)
+    `(let ((stack ,init)
+           (results '()))
+        (loop for x = (pop stack)
+              while x 
+              do (let ((more ,feed))
+                    (if more (setf stack (append more stack))
+                             (setf results (cons ,(if clean-up clean-up 'x) results)))))
+        results))
 
-(defun lcar (stream) (car stream))
-(defun lcdr (stream) (funcall (cdr stream)))
+;; Class representing and alternative value
+;; Basic building block for non-linear programming
+;; (ie. we define many options and we decide aterwards)
+(defclass alt ()
+    ((opts :initarg := :reader opts)))
 
-(defun lconcat (stream more)
-    ;; more: a thunk producing the stream to append once `stream` runs out
-    (if stream (lcons (lcar stream) (lconcat (lcdr stream) more))
-               (funcall more)))
+(defun alt (&rest options)
+    (make-instance 'alt := options))
 
-(defun lmap (fn stream)
-    (if stream (lcons (funcall fn (lcar stream)) (lmap fn (lcdr stream)))))
+(defmethod permutation ((this alt) size)
+    (make-instance 'alt := (apply #'list-prod (repeat size (opts this)))))
 
-(defun lmapcan (fn lst)
-    ;; lst: an ordinary list; fn: element -> stream. Lazily concatenates
-    ;; the streams (fn x) produce, one x at a time.
-    (if lst (lconcat (funcall fn (car lst)) (lambda () (lmapcan fn (cdr lst))))))
+(defmethod combination ((this alt) &optional size)
+    (with-slots (opts) this
+        (if (not size) (setf size (length opts)))
+        (make-instance 'alt :=
+            (reverse (stack-job (loop for next in opts
+                                      collect (list (list next) (remove next opts)))
+                                (let-from* x (acc rest)
+                                    (if (< (length acc) size)
+                                        (loop for next in rest
+                                              collect (list (cons next acc) (remove next rest)))))
+                                (car x))))))
+    
+(defun alt-prod (&rest alts)
+    (make-instance 'alt := (apply #'list-prod (mapcar #'opts alts))))
 
-(test (let ((s (lmap (curry #'+ 1) (lcons 1 (lcons 2 (lcons 3 nil))))))
-        (list (lcar s) (lcar (lcdr s)) (lcar (lcdr (lcdr s)))))
-      '(2 3 4) equal)
+(defmethod map-alt (f (this alt))
+    (make-instance 'alt := (mapcar f (opts this))))
 
-;; ====================================================
-;; 2. Alternatives
-;; ====================================================
-;; Nondeterministic choice: an alternative holds a list of candidate
-;; values for one "slot"; decide explores the (lazy) cartesian product
-;; across several slots looking for a good-enough combination.
-(defclass alternative ()
-    ((options :initarg :options :reader options)))
+(defmethod decide ((this alt) transform grade)
+    (with-slots (opts) this
+        (fold (lambda (acc val)
+                 (if (eq (car acc) 1) acc
+                     (let* ((new-val (funcall transform val))
+                            (grade (funcall grade new-val)))
+                        (if (or (not acc) (> grade (first acc)))
+                            (list grade new-val)
+                            acc))))
+              nil
+              opts)))
+                        
+(defun error-grade (tolerance ref val)
+    (let ((deviation (abs (- ref val))))
+        (if (> deviation tolerance) 0
+            (- 1 (/ deviation tolerance)))))
 
-(defun alternative (&rest options)
-    (make-instance 'alternative :options options))
-
-(defun list-prod* (&rest lists)
-    ;; lazy cartesian product - same tuples as list-prod, produced one at a
-    ;; time so a caller can stop early without paying for the rest
-    (labels ((self (lists)
-                (if (not lists) (lcons nil nil)
-                    (lmapcan (lambda (v) (lmap (curry #'cons v) (self (cdr lists))))
-                             (car lists)))))
-       (self lists)))
-
-(test (let ((s (list-prod* '(1 2) '(a b))))
-        (loop for cell = s then (lcdr cell)
-              while cell
-              collect (lcar cell)))
-      '((1 a) (1 b) (2 a) (2 b))
+(test (let ((coins (alt 5.0 2.0 1.0 0.5 0.2 0.1 0.05 0.02 0.01)))
+         (decide (permutation coins 3)
+                 #'id
+                 (f* (curry #'apply #'+)
+                     (curry #'error-grade 1 1.27))))
+      '(0.98 (1.0 0.2 0.05))
       equal)
 
-(defun decide (process grade &rest alternatives)
-    ;; Explores combinations (one option per alternative) looking for the
-    ;; best-graded (process ...) result. Stops as soon as a combination
-    ;; grades 1.0; a 0.0 grade is never kept, even as a last resort.
-    ;; Returns (list result grade), or nil if nothing scored above 0.0.
-    (labels ((scan (stream best)
-                (if (not stream) best
-                    (let ((result (apply process (lcar stream))))
-                       (if (not result)
-                           (scan (lcdr stream) best)
-                           (let ((g (funcall grade result)))
-                              (cond ((>= g 1.0) (list result g))
-                                    ((and (> g 0.0) (or (not best) (> g (second best))))
-                                     (scan (lcdr stream) (list result g)))
-                                    (t (scan (lcdr stream) best)))))))))
-       (scan (apply #'list-prod* (mapcar #'options alternatives)) nil)))
+(test (decide (combination (alt 13 11 7 5 3) 2)
+              (curry #'apply #'+)
+              (curry #'error-grade 10 22))
+      '(4/5 24) ;; 24, because we can't take 11 twice (combination)
+      equal) 
 
-;; -- test case decoupled from bridge: exact change from a fixed set of
-;; coin denominations. process sums the picked coins, grade rewards sums
-;; close to the expected total, 1.0 only on an exact match.
-(defvar *coin-values* '(5.0 2.0 1.0 0.50 0.20 0.10 0.05 0.02 0.01))
-
-(defun coin-grade (expected coins)
-    (let ((value (apply #'+ coins)))
-        (/ (min expected value) (max expected value))))
-
-(defun coin-change (expected count)
-    (apply #'decide #'list (curry #'coin-grade expected)
-           (loop repeat count collect (apply #'alternative *coin-values*))))
-
-(test (coin-change 0.30 1) (list '(0.2) 0.6666666) equal)
-(test (coin-change 0.30 2) (list '(0.2 0.1) 1.0) equal)
-(test (coin-change 0.07 2) (list '(0.05 0.02) 1.0) equal)
-
+(test (decide (alt-prod (alt 10 9 5) (alt 101 202 303) (alt 505 606 909))
+              (curry #'apply #'+)
+              (curry #'error-grade 10 1018))
+      '(9/10 1019)
+      equal)
 ;; ====================================================
-;; 3. Trickseq
+;; 2. Trickseq
 ;; ====================================================
 ;; Structure made to store trick sequences in one suit,
-;; missing cards possible, additional metadata stored
+;; missing cards possible, additional metadata stored:
+;; leader: which player started first trick in seq
+;; transfers: list of (trick-no . whom) pairs listing
+;;            in which tricks, leader changes to whom
 (defclass trickseq ()
-    ((suit :initform nil :initarg :suit)
+    ((suit :initform nil :initarg :suit :reader suit)
      (tricks :initform nil :initarg :tricks :reader tricks)
+     (leader :initform 0 :initarg :leader :reader leader)
+     (transfers :initform nil :initarg :transfers :reader transfers)
      (remaining :initarg :remaining :reader remaining)))
 
+(defun ranktrick-transfers (tricks &optional (leader 0))
+    (loop for trick in tricks
+          for trickno from 0
+          append (let ((winner (car (car (sort (zip-id trick)
+                                               (lambda (a b)
+                                                  (> (or (second a) -1) (or (second b) -1))))))))
+                    (if (> winner 0)
+                        (let ((new-leader (mod+ 4 leader winner)))
+                            (setf leader new-leader)
+                            `((,trickno ,new-leader)))))))
+
+(test (ranktrick-transfers (str2tricks "2-10-J-5 3-5-A-7 4-Q-K-x 9-x-8-x"))
+      '((0 2) (1 0) (2 2))
+      equal)
+
+(test (ranktrick-transfers (str2tricks "A-x-5-2 K-x-4-3 4-x-Q-6 10-J-x-x") 3)
+      '((2 1) (3 2))
+      equal)
+    
+(defun trickseq (suit remaining &key tricks (leader 0))
+    (make-instance 'trickseq
+                   :suit suit
+                   :tricks tricks
+                   :leader leader
+                   :transfers (reverse (ranktrick-transfers tricks leader))
+                   :remaining remaining))
+
 (defmethod print-object ((this trickseq) o)
-    (format o "SEQ<~A~A:~A>" (suit-uc (slot-value this 'suit))
+    (format o "SEQ<~A~A ~A:~A>" (leader this) (suit-uc (slot-value this 'suit))
                              (joinstr " " (mapcar #'trickstr (tricks this)))
                              (suitsplitstr (remaining this))))
+
+(defmethod len ((this trickseq))
+    (length (tricks this)))
 
 (defmethod eq? ((a trickseq) (b trickseq))
     (and (eq (slot-value a 'suit) (slot-value b 'suit))
          (equal (tricks a) (tricks b))
+         (= (leader a) (leader b))
+         (equal (transfers a) (transfers b))
          (equal (remaining a) (remaining b))))
 
 (defmethod eq? ((a list) (b list))
     (not (filter #'not (mapcar #'eq? a b))))
 
+(defmethod continuation-by ((this trickseq) rel-leader)
+    (trickseq (suit this) (roll (- rel-leader) (remaining this))
+              :leader (mod+ 4 (or (second (car (transfers this)))
+                                  (leader this))
+                              rel-leader)))
+
 (defmethod top-trick ((this trickseq) winner)
     ;; creates a sequence after winner took trick (others laid smallest)
-    (with-slots (suit tricks remaining) this
+    (with-slots (suit tricks leader transfers remaining) this
         (let-from! (apply (curry #'mapcar #'list)
                           (loop for player from 0 to 3
                                 for cards in remaining
@@ -199,13 +228,20 @@
                                                 (list (nth lastno cards) (subseq cards 0 lastno)))
                                             (list (first cards) (rest cards)))))
                    (ranks rest)
-            (make-instance 'trickseq :suit suit
-                                     :tricks (append tricks (list ranks))
-                                     :remaining (roll (- winner) rest)))))
+            (make-instance 'trickseq 
+                :suit suit
+                :tricks (append tricks (list ranks))
+                :leader leader
+                :transfers (if (> winner 0) (cons (list (length tricks)
+                                                        (mod+ 4 (or (second (car transfers))
+                                                                    leader)
+                                                                 winner)) 
+                                                  transfers)
+                                transfers)
+                :remaining (roll (- winner) rest)))))
 
-(test (top-trick (make-instance 'trickseq :suit 'c :remaining (str2split "AJ106 Q4 K532 987")) 2)
-      (make-instance 'trickseq :suit 'c :remaining (str2split "532 98 AJ10 Q") 
-                               :tricks (str2tricks "6-4-K-7"))
+(test (top-trick (trickseq 'c (str2split "AJ106 Q4 K532 987")) 2)
+      (trickseq 'c (str2split "532 98 AJ10 Q") :tricks (str2tricks "6-4-K-7"))
       eq?)
 
 (defmethod highest-holders ((this trickseq))
@@ -233,54 +269,18 @@
                                       (car (last (nth (second highest-holders) remaining)))))
                               (list (top-trick this (second highest-holders))))))))))
  
-(defmethod winner-offset ((this trickseq))
-    ;; Each trick's ranks are stored relative to whoever led *that* trick,
-    ;; not to the original leader - so the winner-index of each trick is a
-    ;; rotation offset, and folding them with mod+ accumulates back to an
-    ;; absolute (well, leader-relative) final position. Void hands (nil
-    ;; rank) are filtered out first, rather than compared - some of the 4
-    ;; can be void, and a single remaining holder must win outright. This
-    ;; same offset is also exactly how far `remaining` has been rotated
-    ;; away from the frame this trickseq was originally built in.
-    (with-slots (tricks) this
-        (fold (curry #'mod+ 4)
-              0
-              (loop for tr in tricks
-                    collect (first (best (lambda (a b) (> (second a) (second b)))
-                                         (filter #'second (zip-id tr))))))))
-
-(defmethod ends-on? ((this trickseq) player)
-    (eq player (winner-offset this)))
-
-(defmethod unrolled-remaining ((this trickseq))
-    ;; `remaining` sits in whatever local frame the last trick left it in;
-    ;; this undoes every continuation roll to re-express it back in the
-    ;; original (position 0 = this trickseq's own leader) frame, so it can
-    ;; be merged with other suits that all share that same reference frame.
-    (with-slots (remaining) this
-        (let ((s (winner-offset this)))
-            (loop for i from 0 to 3 collect (nth (mod (- i s) 4) remaining)))))
-
-(defun trickseq (suit remaining &optional tricks)
-    (make-instance 'trickseq :suit suit :tricks tricks :remaining remaining))
-
-(test (ends-on? (trickseq 's (str2split "J10 - 53 Q") (str2tricks "6-4-K-7 2-8-A-9")) 0)
-      T eq)
-(test (ends-on? (trickseq 's (str2split "53 Q J10 -") (str2tricks "A-4-2-7 6-9-K-8")) 2)
-      T eq)
-
 (test (top-trick-opts (trickseq 'c (str2split "AJ106 Q4 K532 987")))
-      (list (trickseq 'c (str2split "J106 Q K53 98") (str2tricks "A-4-2-7"))
-            (trickseq 'c (str2split "532 98 AJ10 Q") (str2tricks "6-4-K-7")))
+      (list (trickseq 'c (str2split "J106 Q K53 98") :tricks (str2tricks "A-4-2-7"))
+            (trickseq 'c (str2split "532 98 AJ10 Q") :tricks (str2tricks "6-4-K-7")))
       eq?)
 
 
 (test (top-trick-opts (trickseq 'd (str2split "J106 - K532 Q98")))
-      (list (trickseq 'd (str2split "532 Q9 J10 ")(str2tricks "6-x-K-8")))
+      (list (trickseq 'd (str2split "532 Q9 J10 ") :tricks (str2tricks "6-x-K-8")))
       eq?)
 
 (test (top-trick-opts (trickseq 'd (str2split "8 - 3 -")))
-      (list (trickseq 'd '(nil nil nil nil) (str2tricks "8-x-3-x") ))
+      (list (trickseq 'd '(nil nil nil nil) :tricks (str2tricks "8-x-3-x") ))
       eq?)
 
 (test (top-trick-opts (trickseq 's '(nil nil nil nil)))
@@ -302,6 +302,49 @@
       '(((D 4) NIL (D 11) (D 6)))
       equal)
 
+(defmethod split ((this trickseq) at)
+    (with-slots (suit tricks leader transfers remaining) this
+        (flet ((reconstruct-remaining ()
+                   (if (not transfers) remaining
+                       (let ((result remaining)
+                             (current-leader (second (car transfers))))
+                          (loop for trick in (reverse tricks)
+                                for trickno from (- (length tricks) 1) downto 0
+                                while (>= trickno at)
+                                do (let ((transfer-to (second (find-if (f* #'first (curry #'eq trickno))
+                                                                       transfers))))
+                                       (when transfer-to
+                                            (setf result (roll (- transfer-to current-leader) result))
+                                            (setf current-leader transfer-to))
+                                       (setf result (loop for rank in trick
+                                                          for hand in result
+                                                          collect (if rank (cons rank hand) hand)))))
+                          (mapcar (curry* #'sort (x) (x #'<))
+                                  result)))))
+            (list (make-instance 'trickseq
+                                 :suit suit
+                                 :tricks (subseq tricks 0 at)
+                                 :leader leader
+                                 :transfers (filter (f* #'first (curry #'> at))
+                                                    transfers)
+                                 :remaining (reconstruct-remaining))
+                  (make-instance 'trickseq
+                                 :suit suit
+                                 :tricks (subseq tricks at)
+                                 :leader (or (second (first (filter (f* #'first (curry #'> at))
+                                                                    transfers)))
+                                             leader)
+                                 :transfers (mapcar (lambda* (pos to) (list (- pos at) to))
+                                                    (filter (f* #'first (curry #'<= at))
+                                                            transfers))
+                                 :remaining remaining)))))
+              
+(test (split (trickseq 's (str2split "- - - -") :tricks (str2tricks "2-5-K-9 3-8-A-4 7-6-Q-x"))
+             1)
+      (list (trickseq 's (str2split "Q3 8 A7 64") :tricks (str2tricks "2-5-K-9"))
+            (trickseq 's (str2split "- - - -") :tricks (str2tricks "3-8-A-4 7-6-Q-x") :leader 2))
+      eq?)
+
 ;; ======================================================================
 ;; 3. Greedy tricks: lets figure out greedy play sequence for both sides
 ;;    and for further optimizations.
@@ -319,184 +362,242 @@
       results))
     
 (test (suit-tops (trickseq 's (str2split "AJ106 94 K532 Q87")))
-      (list (trickseq 's (str2split "J10 - 53 Q") (str2tricks "6-4-K-7 2-8-A-9"))
-            (trickseq 's (str2split "53 Q J10 -") (str2tricks "A-4-2-7 6-9-K-8")))
+      (list (trickseq 's (str2split "J10 - 53 Q") :tricks (str2tricks "6-4-K-7 2-8-A-9"))
+            (trickseq 's (str2split "53 Q J10 -") :tricks (str2tricks "A-4-2-7 6-9-K-8")))
       eq?)
       
 ;; previously produced this pair of candidates twice over (4 total) - one
 ;; path in each duplicate pair relied on the illegal-duck bug fixed above,
 ;; and happened to converge on the same terminal state as the legal path
 (test (suit-tops (trickseq 'd (str2split "AJ106 974 K532 Q8")))
-      (list (trickseq 'd '(nil nil nil nil) (str2tricks "6-4-K-8 2-Q-A-7 J-9-3-x 10-x-5-x"))
-            (trickseq 'd '(nil nil nil nil) (str2tricks "A-4-2-8 6-7-K-Q 3-x-J-9 10-x-5-x")))
+      (list (trickseq 'd '(nil nil nil nil) :tricks (str2tricks "6-4-K-8 2-Q-A-7 J-9-3-x 10-x-5-x"))
+            (trickseq 'd '(nil nil nil nil) :tricks (str2tricks "A-4-2-8 6-7-K-Q 3-x-J-9 10-x-5-x")))
       eq?)
 
 ;; partner void from the start, so there is never a second holder to
 ;; check for - continuation must not crash trying to mod nil by 2
 (test (suit-tops (trickseq 'd (str2split "AK - - -")))
-      (list (trickseq 'd '(nil nil nil nil) (str2tricks "A-x-x-x K-x-x-x")))
+      (list (trickseq 'd '(nil nil nil nil) :tricks (str2tricks "A-x-x-x K-x-x-x")))
       eq?)
 
-(defmethod roll-lead ((this trickseq))
-    ;; Reinterprets this candidate as if partner, not the original leader,
-    ;; had led its very first trick. Every later trick is already framed
-    ;; relative to "whoever won the previous trick" (a fact about the
-    ;; cards, not a label), so only the first trick needs relabeling -
-    ;; whoever wins it still leads trick two either way. Only meaningful
-    ;; for candidates that already end on partner (see suit-options):
-    ;; that guarantees partner held a card in the suit from the very
-    ;; start too, so the swap can never manufacture an impossible trick.
-    (with-slots (suit tricks remaining) this
-        (make-instance 'trickseq :suit suit
-                                 :tricks (cons (roll 2 (first tricks)) (rest tricks))
-                                 :remaining remaining)))
 
-(test (tricks (roll-lead (trickseq 's (str2split "53 Q J10 -") (str2tricks "A-4-2-7 6-9-K-8"))))
-      (str2tricks "2-7-A-4 6-9-K-8")
-      equal)
+;; when joining trickseqs in scenarios, one of central actions is to make a trickseq
+;; be legal continuation of another one.
+(defmethod adapt-leader ((this trickseq) (predecessor trickseq))
+    (let ((trick-gap (mod (- (or (second (car (transfers predecessor)))
+                                 (leader predecessor))
+                             (leader this))
+                          4)))
+        (cond ((= trick-gap 0)
+                  this)
+              ((nth trick-gap (first (tricks this)))
+                  (make-instance 'trickseq
+                                 :suit (suit this)
+                                 :tricks (cons (roll (- trick-gap) (car (tricks this)))
+                                               (cdr (tricks this)))
+                                 :leader (mod+ 4 (leader this) trick-gap)
+                                 :remaining (remaining this)
+                                 :transfers (let ((ltrans (car (last (transfers this)))))
+                                                (if (eq (car ltrans) 0) ; changed trick was a transfer
+                                                    (let ((base (subseq (transfers this) 0
+                                                                        (- (length (transfers this)) 1))))
+                                                        (if (= (second ltrans) (mod+ 4 (leader this) trick-gap))
+                                                            base
+                                                            (transfers this)))
+                                                    (append (transfers this) `((0 ,(leader this)))))))))))
 
-(test (ends-on? (roll-lead (trickseq 's (str2split "53 Q J10 -") (str2tricks "A-4-2-7 6-9-K-8"))) 0)
-      T eq)
+(test (adapt-leader (trickseq 's (str2split "Q 2 1097 -")
+                                 :leader 0
+                                 :tricks (str2tricks "5-8-J-4 6-3-K-A"))
+                    (trickseq 'c (str2split "- - - -")
+                                 :leader 0
+                                 :tricks (str2tricks "2-10-x-A")))
+      ;; We have to adapt the trick so that 3 is a leader instead of 0...
+      (trickseq 's (str2split "Q 2 1097 -")
+                   :leader 3
+                   :tricks (str2tricks "4-5-8-J 6-3-K-A"))
+      eq?)
 
-(defun suit-target (candidates)
-    ;; best case for this suit alone: its longest naive-tops candidate
-    (if candidates (apply #'max (mapcar (f* #'tricks #'length) candidates)) 0))
+(test (adapt-leader (trickseq 's (str2split "Q 2 1097 -")
+                                 :leader 3
+                                 :tricks (str2tricks "5-8-J-4 6-3-K-A"))
+                    (trickseq 'c (str2split "- - - -")
+                                 :leader 0
+                                 :tricks (str2tricks "2-10-x-A")))
+      ;; No need to adapt, because leader is equal to player who ended previous sequence
+      (trickseq 's (str2split "Q 2 1097 -")
+                   :leader 3
+                   :tricks (str2tricks "5-8-J-4 6-3-K-A"))
+      eq?)
 
-;; Combined naive-tops result across all 4 suits: the merged trick
-;; sequence, what's left in every suit (not just the ones played), and
-;; who is now on lead - so the other partnership's own naive-tops (or
-;; whatever comes next for this one) can pick up from here. `remaining`
-;; is always kept self-consistent with `on-lead`: position 0 in every
-;; suit's leftover holding is whoever `on-lead` says is next to act,
-;; mirroring how trickseq's own `remaining` always leads with position 0.
-(defclass topsline ()
-    ((tricks :initarg :tricks :reader tricks)
-     (remaining :initarg :remaining :reader remaining)
-     (on-lead :initarg :on-lead :reader on-lead)))
 
-(defmethod print-object ((this topsline) o)
-    (format o "LINE<~A tricks, on-lead ~A, remaining ~A>"
-              (length (tricks this)) (on-lead this) (remaining this)))
+(test (adapt-leader (trickseq 's (str2split "Q 2 1097 -")
+                                 :leader 3
+                                 :tricks (str2tricks "A-8-J-4 5-K-6-x"))
+                    (trickseq 'c (str2split "- - - -")
+                                 :leader 0
+                                 :tricks (str2tricks "2-10-x-A")))
+      (trickseq 's (str2split "Q 2 1097 -")
+                   :leader 3
+                   :tricks (str2tricks "A-8-J-4 5-K-6-x"))
+      eq?)
 
-(defun suit-options (holding candidates)
-    ;; Builds one suit's alternative option values: skipping it (using
-    ;; the untouched holding as-is), using it while leader is on lead (as
-    ;; computed - every candidate here requires that, since
-    ;; top-trick-opts refuses to start from a void leader), or using it
-    ;; while partner is on lead (only for candidates that already end on
-    ;; partner, reframed via roll-lead). Every option is
-    ;; (required-initiator ends-on suited-tricks remaining), leader/
-    ;; partner tagged 0/2 throughout - remaining is the same either way
-    ;; a given candidate is framed, since roll-lead never touches it.
-    (cons (list 0 0 nil holding)
-          (append (mapcar (lambda (c) (list 0 (if (ends-on? c 2) 2 0)
-                                            (suited-tricks c) (unrolled-remaining c)))
-                          candidates)
-                  (mapcar (lambda (c) (list 2 2 (suited-tricks (roll-lead c)) (unrolled-remaining c)))
-                          (filter (lambda (c) (ends-on? c 2)) candidates)))))
+(test (adapt-leader (trickseq 's (str2split "Q 2 1097 -")
+                                 :leader 0
+                                 :tricks (str2tricks "A-8-J-4 5-K-6-x"))
+                    (trickseq 'c (str2split "- - - -")
+                                 :leader 0
+                                 :tricks (str2tricks "2-10-x-A")))
+      (trickseq 's (str2split "Q 2 1097 -")
+                   :leader 3
+                   :tricks (str2tricks "4-A-8-J 5-K-6-x"))
+      eq?)
 
-(defun compose-tops (&rest suit-choices)
-    ;; Stitches up to 4 chosen suit-options into one trickline: suits
-    ;; that keep leader in control go first (any order - they never change
-    ;; who's on lead), then at most one suit that hands the lead to partner
-    ;; (the "transfer" - it must go last among leader-block suits, since
-    ;; once it's played leader no longer has the lead to feed anything
-    ;; else its natural way), then the partner-block suits (any order -
-    ;; every one of them starts and ends on partner, so they chain freely).
-    ;; Two transfers would be a contradiction; a partner-block with no
-    ;; transfer at all is simply unreachable. suit-choices arrive in c d
-    ;; h s order (matching naive-tops), so their `remaining` slots can be
-    ;; collected positionally regardless of which block each landed in.
-    (let* ((leader-block (filter (lambda (c) (eq (first c) 0)) suit-choices))
-           (partner-block (filter (lambda (c) (eq (first c) 2)) suit-choices))
-           (transfers (filter (lambda (c) (eq (second c) 2)) leader-block))
-           (stays (filter (lambda (c) (eq (second c) 0)) leader-block)))
-       (if (or (> (length transfers) 1)
-               (and partner-block (not transfers)))
-           nil
-           (let ((merged (apply #'append (mapcar #'third (append stays transfers partner-block)))))
-              ;; a deal only has 13 tricks total - each suit's own count
-              ;; can run past its "real" share once opponents void out and
-              ;; the rest is just filler discards, but the 4 suits share
-              ;; one 13-trick budget, not 4 independent ones. remaining
-              ;; stays leader-relative here (position 0 = original leader,
-              ;; same as unrolled-remaining's own convention) - naive-tops
-              ;; is the one that knows the actual seat numbering, so it
-              ;; does the final conversion to absolute terms.
-              (if (<= (length merged) 13)
-                  (make-instance 'topsline :tricks merged
-                                           :on-lead (if transfers 2 0)
-                                           :remaining (mapcar #'fourth suit-choices)))))))
 
-(defun tops-grade (target line)
-    ;; capped at 13: the suit-independent target can overstate what's
-    ;; actually reachable (see compose-tops), and 13 is the hard ceiling
-    ;; on tricks in any deal, so the best truly achievable line must
-    ;; still grade 1.0 rather than fall short against an inflated target
-    (if (= target 0) 0.0 (/ (length (tricks line)) (min target 13))))
+(test (adapt-leader (trickseq 's (str2split "Q 2 1097 -")
+                                 :leader 0
+                                 :tricks (str2tricks "A-8-J-x 5-K-6-x"))
+                    (trickseq 'c (str2split "- - - -")
+                                 :leader 0
+                                 :tricks (str2tricks "2-10-x-A")))
+      ;; This can't be done, because it would create illegal trick starting from missing card
+      nil
+      eq)
 
-(defun naive-tops (deal leader)
-    ;; deal: 4 hands in a fixed absolute order; leader: seat index (0-3)
-    ;; of whoever is on lead. Searches, suit by suit, for the naive
-    ;; top-trick-taking line that gets closest to each suit's own best case.
-    (let* ((ours (roll (- leader) deal))
-           (holdings (loop for suit in '(c d h s) collect (mapcar (curry* #'hand-suit (h) (h suit)) ours)))
-           (per-suit (loop for suit in '(c d h s)
-                           for holding in holdings
-                           collect (suit-tops (trickseq suit holding))))
-           (target (apply #'+ (mapcar #'suit-target per-suit)))
-           (alts (loop for holding in holdings
-                       for candidates in per-suit
-                       collect (apply #'alternative (suit-options holding candidates))))
-           (out (apply #'decide #'compose-tops (curry #'tops-grade target) alts)))
-       (if out
-           (let ((line (first out)))
-              (list (make-instance 'topsline :tricks (tricks line)
-                                             ;; bring remaining and on-lead back out of the
-                                             ;; leader-rolled working frame into deal's own
-                                             ;; seat numbering, so callers never have to
-                                             ;; account for which seat happened to lead
-                                             :remaining (mapcar (curry #'roll leader) (remaining line))
-                                             :on-lead (mod (+ leader (on-lead line)) 4))
-                    (second out))))))
+;; Then we combine trickseqs into play-scenarios. First a naive greedy play from
+;; both sides, then to apply optimizations. Note that the scenario can contain
+;; more than 13 tricks. This is because then optimizations can be based on reordering
+;; tricks and only in the end the whole scenario would be trimmed to 13-tricks limit
+(defclass play-scenario ()
+    ((phases :initarg :phases :reader phases)))
 
-;; worked example: leader takes AK in spades and the ace in diamonds
-;; (staying on lead throughout, no transfer needed), then either clubs or
-;; hearts serves as the one transfer to partner's hand (they both end
-;; there naturally), letting partner run the rest - 2+1+5+6 suit-by-suit
-;; sums to 14, but suits share one 13-trick budget, so target is capped
-;; at 13 for grading and the actual best (13 tricks - decide happens to
-;; find the line that drops diamonds' free ace rather than trimming a
-;; club, an arbitrary tie-break between equally-long lines worth
-;; revisiting later) grades as the perfect result it actually is
-(test (second (naive-tops (str2deal "S: ♣ QJ43 ♦ A543 ♥ 2 ♠ AK43
-W: ♣ 76 ♦ KQJ10 ♥ 876 ♠ QJ109
-N: ♣ AK1098 ♦ 2 ♥ AKQJ109 ♠ 2
-E: ♣ 52 ♦ 9876 ♥ 543 ♠ 8765") 0))
-      1 =)
+(defmethod print-object ((this play-scenario) o)
+    (format o "SCENARIO<~A>" (phases this)))
 
-;; every test above used leader=0, which can't catch a sign error in how
-;; `leader` rotates `deal` (roll and its negation coincide at 0) - this
-;; one specifically exercises a non-zero leader: E holds AK of spades
-;; outright and must take exactly those 2 tricks
-(test (tricks (first (naive-tops (str2deal "N: ♠ 9743 ♥ K104 ♦ QJ3 ♣ 764
-E: ♠ AK10 ♥ J986 ♦ K74 ♣ 1082
-S: ♠ QJ8652 ♥ AQ732 ♦ A ♣ A
-W: ♠  ♥ 5 ♦ 1098652 ♣ KQJ953") 1)))
-      (suited-tricks (trickseq 's nil (str2tricks "A-2-x-3 K-5-x-4")))
-      equal)
+(defmethod len ((this play-scenario))
+    (apply #'+ (mapcar #'len (phases this))))
 
-;; the run of clubs (N cashes K,Q then goes void; S takes over and runs
-;; A,J,8) hands the lead to South, not North - on-lead and remaining
-;; must reflect that in the caller's own N/E/S/W seat numbering, not
-;; whichever seat happened to lead first
-(test (let ((line (first (naive-tops (str2deal "N: ♠ A742 ♥ 974 ♦ 985 ♣ KQ9
-E: ♠ Q9 ♥ 653 ♦ AK6432 ♣ 64
-S: ♠ KJ86 ♥ Q108 ♦ J ♣ AJ873
-W: ♠ 1053 ♥ AKJ2 ♦ Q107 ♣ 1052") 0))))
-        (list (on-lead line) (remaining line)))
-      (list 2 (list '(nil nil nil nil)
-                    (str2split "985 AK6432 J Q107")
-                    (str2split "974 653 Q108 AKJ2")
-                    '(nil nil nil nil)))
-      equal)
+(defmethod map-phases (f (this play-scenario))
+    (make-instance 'play-scenario :phases (mapcar f (phases this))))
+
+;; Sometimes we can't simply concatenate tricks into scenario, but
+;; we can split a trick into two and put another one in the middle
+(defmethod inject ((base trickseq) (injectee trickseq))
+    (let ((inject-point (first (first (filter (f* #'second (curry #'eq (leader injectee)))
+                                              (transfers base))))))
+        (if inject-point (let-from! (split base (+ inject-point 1))
+                                    (before after)
+                                    (let ((after* (adapt-leader after injectee)))
+                                        (if after* (make-instance 'play-scenario :phases (list before injectee after*))))))))
+
+
+;; The most basic way to create play-scenario is to combine 2 trickseqs
+(defmethod combine ((a trickseq) (b trickseq) &optional _)
+    (declare (ignore _)) ; parameter for compability with one in rest.cl
+    (let ((b* (adapt-leader b a)))
+        (if b* (make-instance 'play-scenario :phases (list a b*))
+               (inject a b))))
+    
+(defmethod combine ((a play-scenario) (b trickseq) &optional _)
+    ;so much code because this method supports not only adding to the end of scenario,
+    ;but wherever possible. This needs finding where last trick in given suit was
+    ;and checking for place where a sequence can be adapted with neighbours.
+
+    (declare (ignore _)) ; parameter for compability with one in rest.cl
+    (labels ((fit (before &optional after)
+                (if before (let* ((link1 (combine (car (last before)) b))
+                                  (before* (subseq before 0 (- (length before) 1))))
+                               (cond ((not link1) (fit before* (cons (car (last before)) after)))
+                                     ((or (not after) (= (len link1) 3) )
+                                         (append before* (phases link1) after))
+                                     (t (let ((link2 (combine link1 (car after))))
+                                         (if link2 (append before* (phases link2) (cdr after))
+                                                   (fit before* (cons (car (last before)) after)))))))))
+             (earliest-point (seqs)
+                (let ((revpos (position-if (f* #'suit (curry #'eq (suit b)))
+                                           (reverse seqs))))
+                    (if (not revpos) (list nil seqs)
+                                     (let ((pos (- (length seqs) revpos)))
+                                        (list (subseq seqs 0 pos) (subseq seqs pos)))))))
+        (with-slots (phases) a
+            (let-from! (earliest-point phases)
+                       (unavailable insertable)
+               (if insertable (let ((inserted (fit insertable)))
+                                 (if inserted (make-instance 'play-scenario 
+                                                    :phases (append unavailable inserted)))))))))
+
+(test (phases (combine (trickseq 's (str2split "- - - -")
+                            :tricks (str2tricks "2-6-K-10 3-9-A-8"))
+                       (trickseq 'c (str2split "- - - -")
+                            :leader 2
+                            :tricks (str2tricks "A-x-x-x K-x-x-x Q-x-x-x"))))
+      ;; Can't combine by concatenation. Source sequence must be split to fit other one
+      (list (trickseq 's (str2split "3 9 A 8") :tricks (str2tricks "2-6-K-10"))
+            (trickseq 'c (str2split "- - - -") :leader 2 :tricks (str2tricks "A-x-x-x K-x-x-x Q-x-x-x"))
+            (trickseq 's (str2split "- - - -") :leader 2 :tricks (str2tricks "3-9-A-8")))
+      eq?)
+
+(test (phases (reduce #'combine (list (trickseq 'h (str2split "- - - -")
+                                            :tricks (str2tricks "5-10-A-4"))
+                                      (trickseq 's (str2split "- - - -")
+                                            :leader 2
+                                            :tricks (str2tricks "2-6-A-10 K-9-5-8"))
+                                      (trickseq 'c (str2split "- - - -")
+                                            :leader 2
+                                            :tricks (str2tricks "A-x-x-x K-x-x-x Q-x-x-x")))))
+       ;; Here testing play-scenario variant where a new trick must be inserted in the middle of scenario
+       (list (trickseq 'h (str2split "- - - -")
+                       :tricks (str2tricks "5-10-A-4"))
+             (trickseq 'c (str2split "- - - -") :leader 2 :tricks (str2tricks "A-x-x-x K-x-x-x Q-x-x-x"))
+             (trickseq 's (str2split "- - - -") :leader 2 :tricks (str2tricks "2-6-A-10 K-9-5-8")))
+
+       eq?)
+
+;; Now we want to compose suit-tops into greedy play for current partnership
+;; and current leader.
+(defun take-tops (deal)
+    (flet ((append-partner-continuation (seqs)
+              (filter (f* #'len (curry #'< 0))
+                      (append seqs
+                              (apply #'append (mapcar (f* (curry* #'continuation-by (x) (x 2))
+                                                       #'suit-tops)
+                                              seqs)))))
+          (prioritize-exhausted (seqs)
+              ;; We want to start from suits that we exhaust on leader hand to
+              ;; make sure that we don't miss taking continuation from partners hand
+              (sort seqs (lambda (a b)
+                             (declare (ignore b))
+                             (and (not (transfers a)) (not (first (remaining a)))))))
+          (combine-or-same (a b)
+             (let ((ans (combine a b)))
+                (cond (ans ans)
+                      ((typep a 'play-scenario) a)
+                      (t (make-instance 'play-scenario :phases (list a)))))))
+        (let* ((suit-splits (mapcar (lambda (suit) 
+                                       (trickseq suit (mapcar (curry* #'hand-suit (h) (h suit))
+                                                              deal)))
+                                    '(c d h s)))
+               (seq-per-suit (mapcar (orf #'suit-tops #'list) suit-splits))
+               (seqalt (map-alt (f* #'prioritize-exhausted #'append-partner-continuation)
+                                (apply #'alt-prod 
+                                       (mapcar (curry #'apply #'alt) 
+                                               seq-per-suit))))
+               (top-len (apply #'max (mapcar (f* (curry #'mapcar #'len)
+                                                 (curry #'apply #'+))
+                                             (opts seqalt)))))
+            (second (decide seqalt
+                            (curry #'reduce #'combine-or-same)
+                            (f* #'len (curry #'error-grade 13 top-len)))))))
+                
+(test (phases (take-tops (str2deal "N: ♠ K ♥ AQ8765 ♦ K9 ♣ A1093
+                                    E: ♠ J2 ♥ 102 ♦ 107654 ♣ 8652
+                                    S: ♠ AQ1094 ♥ 93 ♦ Q32 ♣ KJ4
+                                    W: ♠ 87653 ♥ KJ4 ♦ AJ8 ♣ Q7")))
+      (list (trickseq 's (str2split "- J AQ109 8765") :tricks (str2tricks "K-2-4-3"))
+            (trickseq 'c (str2split "- - 10 8") :tricks (str2tricks "3-2-K-7 4-Q-A-5 9-6-J-x"))
+            (trickseq 's (str2split "- - - -") :leader 2
+                                               :tricks (str2tricks "A-5-x-J Q-6-x-x 10-7-x-x 9-8-x-x"))
+            (trickseq 'h (str2split "Q8765 10 9 KJ") :leader 2 :tricks (str2tricks "3-4-A-2"))
+            (trickseq 'c (str2split "- - - -") :tricks (str2tricks "10-8-x-x")))
+      eq?)
+
