@@ -85,6 +85,9 @@
                              (setf results (cons ,(if clean-up clean-up 'x) results)))))
         results))
 
+(defun pass-if (test value)
+    (if (funcall test value) value))
+
 ;; Class representing and alternative value
 ;; Basic building block for non-linear programming
 ;; (ie. we define many options and we decide aterwards)
@@ -151,6 +154,7 @@
               (curry #'error-grade 10 1018))
       '(9/10 1019)
       equal)
+
 ;; ====================================================
 ;; 2. Trickseq
 ;; ====================================================
@@ -211,11 +215,14 @@
 (defmethod eq? ((a list) (b list))
     (not (filter #'not (mapcar #'eq? a b))))
 
-(defmethod continuation-by ((this trickseq) rel-leader)
-    (trickseq (suit this) (roll (- rel-leader) (remaining this))
-              :leader (mod+ 4 (or (second (car (transfers this)))
-                                  (leader this))
-                              rel-leader)))
+(defmethod last-leader ((this trickseq))
+    (or (second (car (transfers this)))
+        (leader this)))
+
+(defmethod continuation-by ((this trickseq) new-leader)
+    (let ((shift (mod (- new-leader (last-leader this)) 4)))
+        (trickseq (suit this) (roll (- shift) (remaining this))
+                  :leader new-leader)))
 
 (defmethod top-trick ((this trickseq) winner)
     ;; creates a sequence after winner took trick (others laid smallest)
@@ -380,7 +387,6 @@
       (list (trickseq 'd '(nil nil nil nil) :tricks (str2tricks "A-x-x-x K-x-x-x")))
       eq?)
 
-
 ;; when joining trickseqs in scenarios, one of central actions is to make a trickseq
 ;; be legal continuation of another one.
 (defmethod adapt-leader ((this trickseq) (predecessor trickseq))
@@ -469,34 +475,57 @@
 ;; more than 13 tricks. This is because then optimizations can be based on reordering
 ;; tricks and only in the end the whole scenario would be trimmed to 13-tricks limit
 (defclass play-scenario ()
-    ((phases :initarg :phases :reader phases)))
+    ((phases :initarg :phases :reader phases)
+     (remaining :initarg :remaining :initform '(nil nil nil nil) :reader remaining)))
 
 (defmethod print-object ((this play-scenario) o)
-    (format o "SCENARIO<~A>" (phases this)))
+    (format o "SCENARIO<~A:~A>" (phases this) (joinstr "/" (mapcar #'suitsplitstr (remaining this)))))
 
 (defmethod len ((this play-scenario))
     (apply #'+ (mapcar #'len (phases this))))
 
-(defmethod map-phases (f (this play-scenario))
-    (make-instance 'play-scenario :phases (mapcar f (phases this))))
+(defmethod eq? ((a play-scenario) (b play-scenario))
+    (and (eq? (phases a) (phases b))
+         (equal (remaining a) (remaining b))))
+
+;; To make sure that remaining slot contains correct values, sync is called when
+;; new elements are added. Optional parameter is used to check only new parameters.
+;; Without, whole phases slot is processed. 
+(defmethod sync ((this play-scenario) &optional new-phases)
+    (with-slots (phases remaining) this
+        (loop for p in (or new-phases phases)
+              do (setf (nth (suitno (suit p)) remaining)
+                       (roll (leader p) (remaining p))))
+        this))
+
+(defmethod last-leader ((this play-scenario))
+    (last-leader (car (last (phases this)))))
 
 ;; Sometimes we can't simply concatenate tricks into scenario, but
 ;; we can split a trick into two and put another one in the middle
 (defmethod inject ((base trickseq) (injectee trickseq))
     (let ((inject-point (first (first (filter (f* #'second (curry #'eq (leader injectee)))
                                               (transfers base))))))
-        (if inject-point (let-from! (split base (+ inject-point 1))
-                                    (before after)
-                                    (let ((after* (adapt-leader after injectee)))
-                                        (if after* (make-instance 'play-scenario :phases (list before injectee after*))))))))
+        (if inject-point
+            (let-from! (split base (+ inject-point 1))
+                       (before after)
+               (let ((after* (adapt-leader after injectee)))
+                  (if after* (sync (make-instance 'play-scenario
+                                                  :phases (list before injectee after*)))))))))
 
 
-;; The most basic way to create play-scenario is to combine 2 trickseqs
+;; The most basic way to create play-scenario is to combine 2 trickseqs.
+;; Sometimes we combine with no-trick seq to insert remaining splits in
+;; suits not included in scenario. In such case we only call sync.
 (defmethod combine ((a trickseq) (b trickseq) &optional _)
     (declare (ignore _)) ; parameter for compability with one in rest.cl
-    (let ((b* (adapt-leader b a)))
-        (if b* (make-instance 'play-scenario :phases (list a b*))
-               (inject a b))))
+    (if (tricks b)
+        (let ((b* (adapt-leader b a)))
+            (if b* (sync (make-instance 'play-scenario :phases (list a b*)))
+                   (inject a b)))
+        (sync (make-instance 'play-scenario :phases (list a))
+              (list a b))))
+
     
 (defmethod combine ((a play-scenario) (b trickseq) &optional _)
     ;so much code because this method supports not only adding to the end of scenario,
@@ -519,13 +548,31 @@
                     (if (not revpos) (list nil seqs)
                                      (let ((pos (- (length seqs) revpos)))
                                         (list (subseq seqs 0 pos) (subseq seqs pos)))))))
-        (with-slots (phases) a
-            (let-from! (earliest-point phases)
-                       (unavailable insertable)
-               (if insertable (let ((inserted (fit insertable)))
-                                 (if inserted (make-instance 'play-scenario 
-                                                    :phases (append unavailable inserted)))))))))
+        (if (not (tricks b))
+            (sync a (list b))
+            (with-slots (phases remaining) a
+                (let-from! (earliest-point phases)
+                           (unavailable insertable)
+                    (if insertable
+                        (let ((inserted (fit insertable)))
+                            (if inserted (sync (make-instance 'play-scenario 
+                                                        :phases (append unavailable inserted)
+                                                        :remaining remaining)
+                                         (list b))))))))))
 
+(defmethod combine ((a play-scenario) (b play-scenario) &optional _)
+    (declare (ignore _))
+    (labels ((trial-loop (phases &optional (left (length phases)))
+                (if (> left 0)
+                    (let ((link (combine a (car phases))))
+                       (if link (sync (make-instance 'play-scenario
+                                                     :phases (append (phases link) (cdr phases)))
+                                      (cdr phases))
+                                (let ((b* (make-instance 'play-scenario :phases (cdr phases))))
+                                    (trial-loop (or (combine b (car phases)) b*)
+                                                (- left 1))))))))
+       (trial-loop (phases b))))
+       
 (test (phases (combine (trickseq 's (str2split "- - - -")
                             :tricks (str2tricks "2-6-K-10 3-9-A-8"))
                        (trickseq 'c (str2split "- - - -")
@@ -553,51 +600,93 @@
 
        eq?)
 
+
 ;; Now we want to compose suit-tops into greedy play for current partnership
-;; and current leader.
+;; and current leader. Deal can be list of hands or play-scenario.
 (defun take-tops (deal)
-    (flet ((append-partner-continuation (seqs)
-              (filter (f* #'len (curry #'< 0))
-                      (append seqs
-                              (apply #'append (mapcar (f* (curry* #'continuation-by (x) (x 2))
-                                                       #'suit-tops)
-                                              seqs)))))
-          (prioritize-exhausted (seqs)
-              ;; We want to start from suits that we exhaust on leader hand to
-              ;; make sure that we don't miss taking continuation from partners hand
-              (sort seqs (lambda (a b)
-                             (declare (ignore b))
-                             (and (not (transfers a)) (not (first (remaining a)))))))
-          (combine-or-same (a b)
-             (let ((ans (combine a b)))
-                (cond (ans ans)
-                      ((typep a 'play-scenario) a)
-                      (t (make-instance 'play-scenario :phases (list a)))))))
-        (let* ((suit-splits (mapcar (lambda (suit) 
-                                       (trickseq suit (mapcar (curry* #'hand-suit (h) (h suit))
-                                                              deal)))
-                                    '(c d h s)))
-               (seq-per-suit (mapcar (orf #'suit-tops #'list) suit-splits))
-               (seqalt (map-alt (f* #'prioritize-exhausted #'append-partner-continuation)
-                                (apply #'alt-prod 
-                                       (mapcar (curry #'apply #'alt) 
-                                               seq-per-suit))))
-               (top-len (apply #'max (mapcar (f* (curry #'mapcar #'len)
-                                                 (curry #'apply #'+))
-                                             (opts seqalt)))))
-            (second (decide seqalt
+    (labels ((append-partner-continuation (seqs)
+                 (let ((partner-id (mod+ 4 (leader (car seqs)) 2)))
+                   (append seqs
+                           (apply #'append (mapcar (f* (curry* #'continuation-by (x) (x partner-id))
+                                                   #'suit-tops)
+                                           (filter (f** #'remaining #'car #'length (curry #'= 0))
+                                                   seqs))))))
+             (prioritize-exhausted (seqs)
+                 ;; We want to start from suits that we exhaust on leader hand to
+                 ;; make sure that we don't miss taking continuation from partners hand
+                 (sort seqs (lambda (a b)
+                                (declare (ignore b))
+                                (and (not (transfers a)) (not (first (remaining a)))))))
+             (combine-or-same (a b)
+                (let ((ans (combine a b)))
+                   (cond (ans ans)
+                         ((typep a 'play-scenario) a)
+                         (t (make-instance 'play-scenario :phases (list a))))))
+             (splits-for-scenario (deal leader)
+                (mapcar (curry* #'trickseq (suit cards) 
+                                (suit cards :leader (mod+ 4 (last-leader deal) leader)))
+                        '(c d h s) 
+                        (mapcar (curry #'roll leader) (remaining deal))))
+             (tops (suit-splits)
+                (let* ((seq-per-suit (mapcar (orf #'suit-tops #'list) suit-splits))
+                       (seqalt (map-alt (f* #'prioritize-exhausted #'append-partner-continuation)
+                                        (apply #'alt-prod 
+                                               (mapcar (curry #'apply #'alt) 
+                                                        seq-per-suit))))
+                       (top-len (apply #'max (mapcar (f* (curry #'mapcar #'len)
+                                                     (curry #'apply #'+))
+                                                     (opts seqalt)))))
+                    (second (decide seqalt
                             (curry #'reduce #'combine-or-same)
                             (f* #'len (curry #'error-grade 13 top-len)))))))
+        (if (typep deal 'play-scenario)
+            (or (tops (peek (splits-for-scenario deal 1)))
+                (tops (peek (splits-for-scenario deal 3))))
+            (tops (mapcar (lambda (suit) (trickseq suit (mapcar (curry* #'hand-suit (h) (h suit))
+                                                                deal)))
+                          '(c d h s))))))
                 
-(test (phases (take-tops (str2deal "N: ♠ K ♥ AQ8765 ♦ K9 ♣ A1093
-                                    E: ♠ J2 ♥ 102 ♦ 107654 ♣ 8652
-                                    S: ♠ AQ1094 ♥ 93 ♦ Q32 ♣ KJ4
-                                    W: ♠ 87653 ♥ KJ4 ♦ AJ8 ♣ Q7")))
-      (list (trickseq 's (str2split "- J AQ109 8765") :tricks (str2tricks "K-2-4-3"))
-            (trickseq 'c (str2split "- - 10 8") :tricks (str2tricks "3-2-K-7 4-Q-A-5 9-6-J-x"))
-            (trickseq 's (str2split "- - - -") :leader 2
-                                               :tricks (str2tricks "A-5-x-J Q-6-x-x 10-7-x-x 9-8-x-x"))
-            (trickseq 'h (str2split "Q8765 10 9 KJ") :leader 2 :tricks (str2tricks "3-4-A-2"))
-            (trickseq 'c (str2split "- - - -") :tricks (str2tricks "10-8-x-x")))
+(test (take-tops (str2deal "N: ♠ K ♥ AQ8765 ♦ K9 ♣ A1093
+                            E: ♠ J2 ♥ 102 ♦ 107654 ♣ 8652
+                            S: ♠ AQ1094 ♥ 93 ♦ Q32 ♣ KJ4
+                            W: ♠ 87653 ♥ KJ4 ♦ AJ8 ♣ Q7"))
+      (sync (make-instance 'play-scenario :phases 
+                (list (trickseq 's (str2split "- J AQ109 8765") :tricks (str2tricks "K-2-4-3"))
+                      (trickseq 'c (str2split "- - 10 8") :tricks (str2tricks "3-2-K-7 4-Q-A-5 9-6-J-x"))
+                      (trickseq 's (str2split "- - - -") :leader 2
+                                   :tricks (str2tricks "A-5-x-J Q-6-x-x 10-7-x-x 9-8-x-x"))
+                      (trickseq 'h (str2split "Q8765 10 9 KJ") :leader 2 :tricks (str2tricks "3-4-A-2"))
+                      (trickseq 'c (str2split "- - - -") :tricks (str2tricks "10-8-x-x")))))
       eq?)
 
+(test (take-tops (str2deal "N: ♠ 1063 ♥ KQ64 ♦ A94 ♣ Q53
+                            E: ♠ K ♥ 10987 ♦ K1063 ♣ KJ74
+                            S: ♠ Q872 ♥ 53 ♦ J2 ♣ A10986
+                            W: ♠ AJ954 ♥ AJ2 ♦ Q875 ♣ 2"))
+      (make-instance 'play-scenario
+                :phases (list (trickseq 'c (str2split "10986 - Q5 KJ7") :tricks (str2tricks "3-4-A-2"))
+                              (trickseq 'd (str2split "94 K106 J Q87") :tricks (str2tricks "2-5-A-3")
+                                                                       :leader 2))
+                :remaining (list (str2split "10986 - Q5 KJ7")
+                                 (str2split "J Q87 94 K106")
+                                 (str2split "KQ64 10987 53 AJ2")
+                                 (str2split "1063 K Q872 AJ954")))
+      eq?)
+
+(defun greedy-deal (deal)
+    (labels ((process (scenario)
+                (if (filter #'id (remaining scenario))
+                    (let ((continuation (pass-if (lambda (s)
+                                                    (or (not s)
+                                                        (second (phases s))
+                                                        (tricks (first (phases s)))))
+                                                 (take-tops scenario))))
+                        (if continuation (process (combine scenario continuation))
+                                         scenario))
+                    scenario)))
+       (process (take-tops deal))))
+
+(greedy-deal (str2deal "N: ♠ 1063 ♥ KQ64 ♦ A94 ♣ Q53
+                        E: ♠ K ♥ 10987 ♦ K1063 ♣ KJ74
+                        S: ♠ Q872 ♥ 53 ♦ J2 ♣ A10986
+                        W: ♠ AJ954 ♥ AJ2 ♦ Q875 ♣ 2"))
