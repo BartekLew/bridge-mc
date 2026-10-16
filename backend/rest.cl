@@ -158,30 +158,31 @@
                       defhands (append defhands
                                        (list (make-instance 'hand :remaining defhands)))))
                                         
-           (results (list (sim-axis hands) (sim-axis (roll 1 hands))))
-           (winner (let ((t1 (seektree '(0 2) results))
-                         (t2 (seektree '(1 2) results)))
-                      (cond ((> t1 t2) 0)
-                            ((= t1 t2) (if (suitcmp (seektree '(0 0) results)
-                                                    (seektree '(1 0) results))
-                                           0 1))
-                            (t 1)))))
-       (let-from! (nth winner results) (wsuit wdec wtricks woutcome)
-          (declare (ignore wdec woutcome))
-          (let-from! (second (roll winner results)) (dsuit ddec dtricks doutcome)
-             (declare (ignore ddec doutcome))
-             (let* ((wscore (contract-score wsuit wtricks))
-                    (dscore (contract-score dsuit dtricks :level (if (suitcmp dsuit wsuit)
-                                                                    (- wtricks 6)
-                                                                    (- wtricks 5))
-                                                          :double (>= wscore 300))))
-               `(:score (,wscore ,dscore)
-                 :power ,(mapcar (lambda* (roll suit declarer tricks outcome)
-                                    `(:trump ,(suitstr suit)
-                                      :declarer ,declarer
-                                      :score ,tricks
-                                      :sequences ,(play-sequences outcome suit (roll roll hands))))
-                                 (mapcar #'cons (list 0 1) results))))))))
+           (results (list (sim-axis hands) (sim-axis (roll 1 hands)))))
+       `(:score ,(deal-score (subseq (first results) 0 3) (subseq (second results) 0 3))
+         :power ,(mapcar (lambda* (roll suit declarer tricks outcome)
+                            `(:trump ,(suitstr suit)
+                              :declarer ,declarer
+                              :score ,tricks
+                              :sequences ,(play-sequences outcome suit (roll roll hands))))
+                         (mapcar #'cons (list 0 1) results)))))
+
+; Scores of the side winning the auction and of the other one competing
+; over it, given (suit declarer tricks) of both sides' contracts
+(defun deal-score (a b)
+    (let ((winner (cond ((> (third a) (third b)) 0)
+                        ((= (third a) (third b)) (if (suitcmp (first a) (first b)) 0 1))
+                        (t 1))))
+       (let-from! (nth winner (list a b)) (wsuit wdec wtricks)
+          (declare (ignore wdec))
+          (let-from! (nth (- 1 winner) (list a b)) (dsuit ddec dtricks)
+             (declare (ignore ddec))
+             (let ((wscore (contract-score wsuit wtricks)))
+                (list wscore
+                      (contract-score dsuit dtricks :level (if (suitcmp dsuit wsuit)
+                                                               (- wtricks 6)
+                                                               (- wtricks 5))
+                                                    :double (>= wscore 300))))))))
 
 (defparameter *sims-dir* (merge-pathnames "sims/" (uiop:getcwd)))
 
@@ -195,12 +196,15 @@
 (defun new-sim-id ()
     (format nil "~(~36R~36R~)" (get-universal-time) (random (expt 36 3))))
 
+(defun write-sim (id sim)
+    (ensure-directories-exist *sims-dir*)
+    (with-open-file (out (sim-path id) :direction :output :if-exists :supersede
+                                       :external-format :utf-8)
+        (write-string (jonathan:to-json sim) out)))
+
 (defun save-sim (hands result)
     (let ((id (new-sim-id)))
-        (ensure-directories-exist *sims-dir*)
-        (with-open-file (out (sim-path id) :direction :output :if-exists :supersede
-                                           :external-format :utf-8)
-            (write-string (jonathan:to-json `(:hands ,hands :result ,result)) out))
+        (write-sim id `(:hands ,hands :result ,result))
         id))
 
 (defun load-sim (id)
@@ -212,6 +216,148 @@
 (defun sim-deal-saved (hands raw-hands)
     (let ((result (sim-deal hands)))
         `(:id ,(save-sim raw-hands result) ,@result)))
+
+;; Editing play of saved simulations: tricks are removed from the end of
+;; play or added there. Sequences cut or made by the user have no comment;
+;; edited axes are marked EDITED.
+
+(define-condition edit-error (simple-error) ())
+
+(defun edit-error (fmt &rest args)
+    (error 'edit-error :format-control fmt :format-arguments args))
+
+(defparameter *seats* '("N" "E" "S" "W"))
+
+(defun str2card (str)
+    (and (stringp str) (> (length str) 1)
+         (let ((suit (str2suitno (subseq str 0 1)))
+               (rank (position (subseq str 1) '("2" "3" "4" "5" "6" "7" "8" "9" "10" "J" "Q" "K" "A")
+                               :test #'equal)))
+            (and suit rank (list suit rank)))))
+
+; Hands of the deal by seat (N E S W) from hands of saved sim
+(defun sim-hands (formulas)
+    (let ((hands (mapcar #'str2hand formulas)))
+        (mapcar #'suits (if (= (length hands) 4) hands
+                            (append hands (list (make-instance 'hand :remaining hands)))))))
+
+; Computed hand has no proper id; it's always the last one (W)
+(defun declarer-seat (axis)
+    (or (position (getf axis :|DECLARER|) *seats* :test #'equal) 3))
+
+(defun axis-tricks (axis)
+    (loop for seq in (getf axis :|SEQUENCES|) append (getf seq :|TRICKS|)))
+
+; Hands left by seat, seat to lead and tricks taken by declarer's side after
+; tricks of axis are played
+(defun play-state (hands axis)
+    (let* ((trump (str2suitno (getf axis :|TRUMP|)))
+           (declarer (declarer-seat axis))
+           (leader (mod (+ declarer 1) 4))
+           (taken 0))
+        (loop for trick in (axis-tricks axis)
+              for cards = (mapcar #'str2card trick)
+              for winner = (mod (+ leader (trick-winner cards trump)) 4)
+              do (setf hands (play-trick hands leader cards))
+                 (setf leader winner)
+                 (if (evenp (- winner declarer)) (incf taken)))
+        (values hands leader taken)))
+
+(defun play-done? (hands axis)
+    (every #'null (apply #'append (play-state hands axis))))
+
+(defun plain-seq (tricks winners)
+    `(:|TRICKS| ,tricks :|WINNERS| ,winners))
+
+; Sequences without the last trick; empty ones at the end are dropped
+(defun pop-trick (seqs)
+    (let ((seqs (loop with ans = (reverse seqs)
+                      while (and ans (not (getf (car ans) :|TRICKS|)))
+                      do (pop ans)
+                      finally (return (reverse ans)))))
+        (if (not seqs) (edit-error "No tricks to remove"))
+        (let* ((last-seq (car (last seqs)))
+               (tricks (butlast (getf last-seq :|TRICKS|))))
+            (append (butlast seqs)
+                    (if tricks (list (plain-seq tricks (butlast (getf last-seq :|WINNERS|)))))))))
+
+(defun push-trick (seqs trick winner)
+    (let ((last-seq (car (last seqs))))
+        (if last-seq
+            (append (butlast seqs)
+                    (list (plain-seq (append (getf last-seq :|TRICKS|) (list trick))
+                                     (append (getf last-seq :|WINNERS|) (list winner)))))
+            (list (plain-seq (list trick) (list winner))))))
+
+(defun split-seqs (seqs)
+    (if (or (not seqs) (not (getf (car (last seqs)) :|TRICKS|)))
+        (edit-error "Next tricks go to a new sequence already"))
+    (append seqs (list (plain-seq nil nil))))
+
+; (suit declarer tricks) of axis as deal-score takes it
+(defun axis-contract (axis)
+    (let ((suit (str2suitno (getf axis :|TRUMP|))))
+        (list (and suit (nth suit '(c d h s)))
+              (getf axis :|DECLARER|)
+              (getf axis :|SCORE|))))
+
+; Applies action (pop, clear, split, play or trick) to play of axis axis-no
+; of saved sim id. Returns (:result ...) with the updated result, which gets
+; saved, or (:choices ...) of tricks to choose from, sim left intact. Play
+; adds a trick taken by card, trick adds the explicit one.
+(defun sim-edit (id axis-no action card trick)
+    (let* ((sim (jonathan:parse (or (load-sim id) (edit-error "No simulation ~A" id))))
+           (result (getf sim :|RESULT|))
+           (power (getf result :|POWER|))
+           (axis (if (and (integerp axis-no) (< -1 axis-no (length power)))
+                     (nth axis-no power)
+                     (edit-error "Bad axis ~A" axis-no)))
+           (hands (sim-hands (getf sim :|HANDS|)))
+           (trump (str2suitno (getf axis :|TRUMP|)))
+           (seqs (getf axis :|SEQUENCES|)))
+        (multiple-value-bind (left leader) (play-state hands axis)
+            (labels ((check-open ()
+                        (if (every #'null (apply #'append left))
+                            (edit-error "All cards are played")))
+                     (push-cards (cards)
+                        (push-trick seqs (mapcar #'cardstr cards) (trick-winner cards trump))))
+                (let ((new-seqs
+                        (cond ((equal action "pop") (pop-trick seqs))
+                              ((equal action "clear") nil)
+                              ((equal action "split") (check-open) (split-seqs seqs))
+                              ((equal action "trick")
+                                 (check-open)
+                                 (let ((cards (mapcar #'str2card trick)))
+                                    (if (not (legal-trick? left leader cards))
+                                        (edit-error "Trick ~A can't be played now" trick))
+                                    (push-cards cards)))
+                              ((equal action "play")
+                                 (check-open)
+                                 (let* ((c (or (str2card card) (edit-error "Bad card ~A" card)))
+                                        (seat (or (position-if (lambda (h) (member (second c) (nth (first c) h)))
+                                                               left)
+                                                  (edit-error "Card ~A is played already" card))))
+                                    (multiple-value-bind (tricks takes) (card-tricks left leader trump seat c)
+                                       (cond ((not tricks)
+                                                (edit-error "Card ~A can't be played to this trick" card))
+                                             ((and takes (= (length tricks) 1))
+                                                (push-cards (first tricks)))
+                                             (t (return-from sim-edit
+                                                   `(:choices ,(mapcar (lambda (tr)
+                                                                          `(:trick ,(mapcar #'cardstr tr)
+                                                                            :winner ,(trick-winner tr trump)))
+                                                                       tricks)
+                                                     :takes ,(if takes t :false)
+                                                     :leader ,(nth leader *seats*))))))))
+                              (t (edit-error "Unknown action ~A" action)))))
+                    (setf (getf axis :|SEQUENCES|) new-seqs)
+                    (setf (getf axis :|EDITED|) t)
+                    (setf (getf axis :|SCORE|) (nth-value 2 (play-state hands axis)))
+                    (setf (nth axis-no power) axis)
+                    (if (every (curry #'play-done? hands) power)
+                        (setf (getf result :|SCORE|) (apply #'deal-score (mapcar #'axis-contract power))))
+                    (write-sim id sim)
+                    `(:result ,result))))))
 
 (defclass result ()
     ((success :reader ok?)
@@ -399,6 +545,12 @@
                                :parse-args (list (f* (curry #'mapcar #'hand-parser)
                                                      (curry #'fold #'combine (make-instance 'result)))
                                                  nil)))
+      ((string= path "/api/simedit")
+       (let ((request (jonathan:parse (read-body env))))
+          (handler-case (json-response 200 (sim-edit (getf request :|id|) (getf request :|axis|)
+                                                     (getf request :|action|) (getf request :|card|)
+                                                     (getf request :|trick|)))
+            (edit-error (e) (json-response 400 `(:error ,(princ-to-string e)))))))
       ((substr= "/api/simdeal/" path)
        (let ((saved (load-sim (subseq path (length "/api/simdeal/")))))
           (if saved `(200 (:content-type "application/json") (,saved))

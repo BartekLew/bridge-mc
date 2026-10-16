@@ -3505,3 +3505,221 @@ W: ♣ A1087 ♦ KQ5 ♥ 762 ♠ Q102"))
                                collect (list suit (append as bs))))))
        (car longest)))
        
+
+;; ===========================
+;; Tricks chosen by the user
+;; ===========================
+; Hands are given by seat as lists of ascending ranks in each suit (as suits
+; of hand) and cards as (suit rank), suits being numbers.
+
+; Does card a beat card b, the best one so far in a trick led in suit led?
+(defun card-beats? (a b led trump)
+    (cond ((eql (first a) (first b)) (> (second a) (second b)))
+          ((and trump (eql (first a) trump)) t)
+          ((and trump (eql (first b) trump)) nil)
+          (t (eql (first a) led))))
+
+; Position of the card taking trick (cards listed from the leader)
+(defun trick-winner (trick trump)
+    (let ((best 0))
+        (loop for i from 1 below (length trick)
+              when (card-beats? (nth i trick) (nth best trick) (first (first trick)) trump)
+              do (setf best i))
+        best))
+
+(test (trick-winner '((3 2) (3 11) (0 0) (3 5)) 0) 2 eql)
+(test (trick-winner '((3 2) (3 11) (1 0) (3 5)) 0) 1 eql)
+(test (trick-winner '((3 2) (3 11) (0 0) (3 5)) nil) 1 eql)
+
+(defun without-card (suits card)
+    (loop for s from 0
+          for ranks in suits
+          collect (if (= s (first card)) (remove (second card) ranks) ranks)))
+
+; Hands by seat after trick led by seat leader is played
+(defun play-trick (hands leader trick)
+    (loop for seat from 0 below 4
+          collect (without-card (nth seat hands) (nth (mod (- seat leader) 4) trick))))
+
+; Cards hand can play to a trick led in suit led (any card when leading)
+(defun legal-cards (suits led)
+    (if (and led (nth led suits))
+        (mapcar (lambda (r) (list led r)) (nth led suits))
+        (loop for s from 0 below 4
+              append (mapcar (lambda (r) (list s r)) (nth s suits)))))
+
+(defun legal-trick? (hands leader trick)
+    (and (= (length trick) 4)
+         (loop for card in trick
+               for i from 0
+               always (and card
+                           (member card (legal-cards (nth (mod (+ leader i) 4) hands)
+                                                     (if (> i 0) (first (first trick))))
+                                   :test #'equal)))))
+
+; Card of hand not trying to take the trick: the lowest one in led suit or
+; else the lowest one of weak-suit. Others are hands of other seats.
+(defun duck-card (suits led trump others)
+    (if (nth led suits)
+        (list led (first (nth led suits)))
+        (let ((suit (weak-suit (mkhand (mapcar #'copy-list suits))
+                               (make-instance 'trick :suit led :trump trump
+                                              :remaining (mapcar (lambda (o) (mkhand (copy-tree o))) others)))))
+            (list suit (first (nth suit suits))))))
+
+; Groups of equivalent cards of a hand, as no card of others falls between
+; them, each given by its lowest card
+(defun card-groups (suits others)
+    (loop for s from 0 below 4
+          append (let ((other-ranks (loop for o in others append (nth s o)))
+                       (prev nil))
+                     (loop for r in (nth s suits)
+                           when (or (not prev) (find-if (lambda (o) (< prev o r)) other-ranks))
+                           collect (list s r)
+                           do (setf prev r)))))
+
+(test (card-groups '(nil nil nil (2 3 6 7 9)) '((nil nil nil (4 11)) (nil nil nil (5 8))))
+      '((3 2) (3 6) (3 9))
+      equal)
+
+; Trick (cards from leader) led with card lead, in which seat w takes the
+; trick with card win, fixed-seat plays fixed-card, force-seat plays
+; force-card and others duck. Nil when a card isn't legal, win doesn't take
+; the trick or an opponent of w playing after it (and not fixed) could beat it.
+(defun forced-trick (hands leader trump lead w win &key fixed-seat fixed-card force-seat force-card)
+    (let* ((seats (loop for i from 0 below 4 collect (mod (+ leader i) 4)))
+           (led (first lead))
+           (trick (loop for seat in seats
+                        for i from 0
+                        collect (cond ((= i 0) lead)
+                                      ((= seat w) win)
+                                      ((eql seat fixed-seat) fixed-card)
+                                      ((eql seat force-seat) force-card)
+                                      (t (duck-card (nth seat hands) led trump
+                                                    (loop for s in seats
+                                                          unless (= s seat)
+                                                          collect (nth s hands)))))))
+           (wpos (position w seats)))
+        (and (legal-trick? hands leader trick)
+             (= (trick-winner trick trump) wpos)
+             (loop for seat in (nthcdr (+ wpos 1) seats)
+                   never (and (oddp (- seat w))
+                              (not (eql seat fixed-seat))
+                              (find-if (lambda (card) (card-beats? card win led trump))
+                                       (legal-cards (nth seat hands) led))))
+             trick)))
+
+; The highest card of seat w lower than win in its suit and not equivalent
+; to it, i.e. a card of others falls between them
+(defun cheaper-card (hands w win)
+    (let ((others (loop for s from 0 below 4
+                        unless (= s w)
+                        append (nth (first win) (nth s hands)))))
+        (loop with top = (second win)
+              for r in (reverse (nth (first win) (nth w hands)))
+              when (< r top)
+              do (if (find-if (lambda (o) (< r o top)) others)
+                     (return (list (first win) r))
+                     (setf top r)))))
+
+(test (cheaper-card '((nil nil nil (5 8 11 12)) (nil nil nil (4 7 10))
+                      (nil nil nil (1 2 9)) (nil nil nil (0 3 6)))
+                    1 '(3 10))
+      '(3 7)
+      equal)
+
+; Tricks in which seat w takes the trick with card win, built by
+; forced-trick, but with win played only when needed. When a cheaper card of
+; w would take the trick as well, an opponent of w playing before it forces
+; win with the lowest card he can (leading it, if he leads), which gives a
+; trick per such opponent. If none can, the trick stays as it is.
+(defun natural-tricks (hands leader trump lead w win fixed-seat fixed-card)
+    (let ((cheaper (and (/= w leader) (cheaper-card hands w win))))
+        (labels ((trick (win lead &optional force-seat force-card)
+                    (forced-trick hands leader trump lead w win
+                                  :fixed-seat fixed-seat :fixed-card fixed-card
+                                  :force-seat force-seat :force-card force-card))
+                 (forcing (lead &optional force-seat force-card)
+                    (and (not (and cheaper (trick cheaper lead force-seat force-card)))
+                         (trick win lead force-seat force-card))))
+            (let ((base (trick win lead)))
+                (cond ((not base) nil)
+                      ((forcing lead) (list base))
+                      (t (or (loop for i from 0 below 4
+                                   for h = (mod (+ leader i) 4)
+                                   until (= h w)
+                                   when (and (oddp (- h w)) (not (eql h fixed-seat)))
+                                   append (let ((ans (if (= h leader)
+                                                         (loop for r in (nth (first win) (nth h hands))
+                                                               thereis (forcing (list (first win) r)))
+                                                         (loop for c in (legal-cards (nth h hands) (first lead))
+                                                               thereis (forcing lead h c)))))
+                                             (and ans (list ans))))
+                             (list base))))))))
+
+(defun lowest-cards (suits)
+    (loop for s from 0 below 4
+          when (nth s suits)
+          collect (list s (first (nth s suits)))))
+
+; Tricks (cards from leader) in which seat plays card, the user wanting it
+; to take the trick. Second value tells if card takes them. If it does,
+; there's a trick for each way it can (e.g. ruffing different suits led).
+; Otherwise there's a trick for each other card that could take it, one per
+; group of equivalent cards. The leader leads the lowest card of a suit
+; unless his card is the chosen or the winning one.
+(defun card-tricks (hands leader trump seat card)
+    (labels ((leads (w win)
+                (cond ((= leader seat) (list card))
+                      ((= leader w) (list win))
+                      (t (lowest-cards (nth leader hands)))))
+             (tricks (w wins)
+                (remove-duplicates
+                    (loop for win in wins
+                          append (loop for lead in (leads w win)
+                                       append (natural-tricks hands leader trump lead w win seat card)))
+                    :test #'equal :from-end t)))
+        (let ((own (tricks seat (list card))))
+            (if own
+                (values own t)
+                (values (remove-duplicates
+                            (loop for w from 0 below 4
+                                  unless (= w seat)
+                                  append (tricks w (card-groups (nth w hands)
+                                                                (loop for s from 0 below 4
+                                                                      unless (= s w)
+                                                                      collect (nth s hands)))))
+                            :test #'equal :from-end t)
+                        nil)))))
+
+; J854 Q62 AK7 1093, the 2 chosen: J takes it, or the K or the 9 after 4 led
+(test (multiple-value-list
+          (card-tricks '((nil nil nil (2 3 6 9)) (nil nil nil (0 4 10))
+                         (nil nil nil (5 11 12)) (nil nil nil (1 7 8)))
+                       0 nil 1 '(3 0)))
+      '((((3 9) (3 0) (3 5) (3 1)) ((3 2) (3 0) (3 11) (3 1)) ((3 2) (3 0) (3 5) (3 7))) nil)
+      equal)
+
+; AK107 Q96 J43 852, S leading, E's Q chosen: the 9 would do after low cards,
+; so S leads the J or N finesses the 10
+(test (multiple-value-list
+          (card-tricks '((nil nil nil (5 8 11 12)) (nil nil nil (4 7 10))
+                         (nil nil nil (1 2 9)) (nil nil nil (0 3 6)))
+                       2 nil 1 '(3 10)))
+      '((((3 9) (3 0) (3 5) (3 10)) ((3 1) (3 0) (3 8) (3 10))) t)
+      equal)
+
+; The K takes it when 4 is led
+(test (multiple-value-list
+          (card-tricks '((nil nil nil (2 3 6 9)) (nil nil nil (0 4 10))
+                         (nil nil nil (5 11 12)) (nil nil nil (1 7 8)))
+                       0 nil 2 '(3 11)))
+      '((((3 2) (3 0) (3 11) (3 1))) t)
+      equal)
+
+; Hearts trumps, the third hand void in clubs and diamonds can ruff either
+(test (card-tricks '(((0 1) (0 1) nil nil) ((2 3) (2 3) nil nil)
+                     (nil nil (0) (5)) ((4 5) (4 5) nil nil))
+                   0 2 2 '(2 0))
+      '(((0 0) (0 2) (2 0) (0 4)) ((1 0) (1 2) (2 0) (1 4)))
+      equal)
