@@ -123,6 +123,36 @@
     (> (or (suitno a) 4)
        (or (suitno b) 4)))
 
+;; Splitting play into short sequences of tricks to make it easier to follow.
+
+; Numbers of tricks in consecutive sequences; the last one takes the rest
+(defparameter *sequence-sizes* '(5 5 3))
+
+; Cut points (numbers of tricks played so far) dividing n tricks by sizes
+(defun sequence-cuts (sizes n)
+    (let ((sum 0))
+        (append (loop for size in (butlast sizes)
+                      while (< (+ sum size) n)
+                      collect (incf sum size))
+                (list n))))
+
+(test (sequence-cuts '(5 5 3) 13) '(5 10 13) equal)
+(test (sequence-cuts '(5 5 3) 7) '(5 7) equal)
+
+; Tricks of outcome grouped into sequences of *sequence-sizes* tricks, each
+; with its own summary. Winners are positions of trick winners relative to
+; trick leader. Hands are in order: declarer, LHO, dummy, RHO.
+(defun play-sequences (outcome suit hands)
+    (loop for start = 0 then end
+          for end in (sequence-cuts *sequence-sizes* (length (tricks outcome)))
+          collect `(:tricks ,(mapcar (curry #'mapcar #'cardstr)
+                                     (subseq (tricks outcome) start end))
+                    :winners ,(subseq (winner-nos outcome) start end)
+                    :comment ,(format nil "~A"
+                                  (apply #'summarize-outcome
+                                         (append (list outcome suit) hands
+                                                 (list :start start :end end :show-trump nil)))))))
+
 (defun sim-deal (defhands)
     (let* ((hands (if (= (length defhands) 4)
                       defhands (append defhands
@@ -150,11 +180,38 @@
                                     `(:trump ,(suitstr suit)
                                       :declarer ,declarer
                                       :score ,tricks
-                                      :tricks ,(mapcar (curry #'mapcar #'cardstr) (tricks outcome))
-                                      :comment ,(format nil "~A"
-                                                    (apply (curry #'summarize-outcome outcome suit)
-                                                           (roll roll hands)))))
+                                      :sequences ,(play-sequences outcome suit (roll roll hands))))
                                  (mapcar #'cons (list 0 1) results))))))))
+
+(defparameter *sims-dir* (merge-pathnames "sims/" (uiop:getcwd)))
+
+(defun sim-path (id)
+    (merge-pathnames (format nil "~A.json" id) *sims-dir*))
+
+(defun valid-sim-id? (id)
+    (and (> (length id) 0)
+         (every #'alphanumericp id)))
+
+(defun new-sim-id ()
+    (format nil "~(~36R~36R~)" (get-universal-time) (random (expt 36 3))))
+
+(defun save-sim (hands result)
+    (let ((id (new-sim-id)))
+        (ensure-directories-exist *sims-dir*)
+        (with-open-file (out (sim-path id) :direction :output :if-exists :supersede
+                                           :external-format :utf-8)
+            (write-string (jonathan:to-json `(:hands ,hands :result ,result)) out))
+        id))
+
+(defun load-sim (id)
+    (if (valid-sim-id? id)
+        (with-open-file (in (sim-path id) :if-does-not-exist nil :external-format :utf-8)
+            (if in (let ((str (make-string (file-length in))))
+                      (subseq str 0 (read-sequence str in)))))))
+
+(defun sim-deal-saved (hands raw-hands)
+    (let ((result (sim-deal hands)))
+        `(:id ,(save-sim raw-hands result) ,@result)))
 
 (defclass result ()
     ((success :reader ok?)
@@ -312,7 +369,8 @@
                                                names))))
 
 (defun substr= (ref str)
-    (string= ref (subseq str 0 (length ref))))
+    (and (>= (length str) (length ref))
+         (string= ref (subseq str 0 (length ref)))))
 
 (defun json-response (retcode response)
     `(,retcode (:content-type "application-json")
@@ -337,9 +395,14 @@
           (simple-endpoint env '(:|user| :|since|) (curry #'auction *table*)
                                :parse-args (list *user-validator*)))
       ((string= path "/api/simdeal")
-          (simple-endpoint env '(:|hands|) #'sim-deal
+          (simple-endpoint env '(:|hands| :|hands|) #'sim-deal-saved
                                :parse-args (list (f* (curry #'mapcar #'hand-parser)
-                                                     (curry #'fold #'combine (make-instance 'result))))))
+                                                     (curry #'fold #'combine (make-instance 'result)))
+                                                 nil)))
+      ((substr= "/api/simdeal/" path)
+       (let ((saved (load-sim (subseq path (length "/api/simdeal/")))))
+          (if saved `(200 (:content-type "application/json") (,saved))
+                    (json-response 404 `(:status :not-found)))))
       ((string= path "/api/mc")
           (simple-endpoint env '(:|defs| :|measures|) #'mc-deal'
                                :parse-args (list #'hand-or-def-parser #'measure-parser)))

@@ -2293,7 +2293,12 @@ W: ♣ A1087 ♦ KQ5 ♥ 762 ♠ Q102"))
     (finesses :initarg :finesses :initform nil :reader finesses)
     (score :initform '(0 0) :initarg :score :reader score)
     (roll :initform 0 :initarg :roll)
-    (remaining :initarg :remaining :reader remaining)))
+    (remaining :initarg :remaining :reader remaining)
+    ; outcomes of consecutive play actions this one is made of (see chain-outcome)
+    (sub-outcomes :initform nil)))
+
+(defmethod sub-outcomes ((self outcome))
+    (or (slot-value self 'sub-outcomes) (list self)))
 
 (defmethod print-object ((self outcome) out)
     (format out "OUTCOME<~A => ~A / ~A>" (mapcar (curry #'mapcar #'cardstr) (tricks self)) 
@@ -2336,6 +2341,12 @@ W: ♣ A1087 ♦ KQ5 ♥ 762 ♠ Q102"))
                                              collect (+ a b))
                                 :roll (mod (+ roll (slot-value other 'roll)) 4)
                                 :remaining (remaining other))))
+
+; Like add-outcome*, but remembers other as a separate part of the play
+(defmethod chain-outcome ((self outcome) (other outcome))
+    (let ((ans (add-outcome* self other)))
+        (setf (slot-value ans 'sub-outcomes) (append (sub-outcomes self) (list other)))
+        ans))
 
 (defmethod new-outcome ((tricks list))
     (fold #'add-outcome*
@@ -3045,7 +3056,7 @@ W: ♣ A1087 ♦ KQ5 ♥ 762 ♠ Q102"))
                      (make-instance 'deal-play
                                     :hands (remaining ans)
                                     :trump trump
-                                    :outcome (if outcome (add-outcome* outcome ans) ans)
+                                    :outcome (if outcome (chain-outcome outcome ans) ans)
                                     :active (if (won? ans) new-a new-p)
                                     :passive (if (won? ans) new-p new-a)))))))
     
@@ -3128,12 +3139,13 @@ W: ♣ A1087 ♦ KQ5 ♥ 762 ♠ Q102"))
      (defense-trick-cards :initarg :defense-trick-cards :reader defense-trick-cards)
      (declarer-ruffs :initarg :declarer-ruffs :reader declarer-ruffs)
      (defense-ruffs :initarg :defense-ruffs :reader defense-ruffs)
-     (finesses :initarg :finesses :initform nil :reader finesses)))
+     (finesses :initarg :finesses :initform nil :reader finesses)
+     (show-trump :initarg :show-trump :initform t)))
 
 (defmethod print-object ((self deal-summary) out)
     (with-slots (trump declarer-tricks defense-tricks declarer-trick-cards defense-trick-cards
-                 declarer-ruffs defense-ruffs finesses) self
-        (format out "Trump: ~A~%" (suit-uc trump))
+                 declarer-ruffs defense-ruffs finesses show-trump) self
+        (if show-trump (format out "Trump: ~A~%" (suit-uc trump)))
         (format out "Declarer's side took ~A tricks, the defense took ~A.~%" declarer-tricks defense-tricks)
         (format out "Declarer tricks: ~A~%" (print-hand (cards-by-suit declarer-trick-cards)))
         (format out "Defender tricks: ~A~%" (print-hand (cards-by-suit defense-trick-cards)))
@@ -3157,38 +3169,47 @@ W: ♣ A1087 ♦ KQ5 ♥ 762 ♠ Q102"))
                                           (third entry))))
             (format out "No finesses were taken.~%"))))
 
-(defun summarize-outcome (outcome trump declarer left dummy right)
-    (let* ((tricks (tricks outcome))
-           (winners (winners outcome))
+; Summary of tricks from start (inclusive) to end (exclusive) of outcome;
+; by default the whole play. Earlier tricks still count as played when
+; finesses are judged.
+(defun summarize-outcome (outcome trump declarer left dummy right &key (start 0) end (show-trump t))
+    (let* ((all-tricks (tricks outcome))
+           (end (or end (length all-tricks)))
+           (tricks (subseq all-tricks start end))
+           (winners (subseq (winners outcome) start end))
            (trump-suit (normsuit trump))
            (led-suits (mapcar #'caar tricks))
            (finesse-events (loop for i from 0
-                                 for trick in tricks
+                                 for trick in all-tricks
                                  for trick-finesses in (finesses outcome)
+                                 when (and (<= start i) (< i end))
                                  append (loop for f in trick-finesses
                                              for pos = (position f trick :test #'equal)
-                                             for played-before = (append (apply #'append (subseq tricks 0 i))
+                                             for played-before = (append (apply #'append (subseq all-tricks 0 i))
                                                                          (subseq trick 0 pos))
                                              for owner = (card-owner f declarer left dummy right)
                                              for against = (live-opponent-honors (first f) (second f) owner
                                                                                  played-before declarer left dummy right)
                                              when against
                                              collect (list owner f (length against) against)))))
-        (make-instance 'deal-summary
-                       :trump trump-suit
-                       :declarer-tricks (second (score outcome))
-                       :defense-tricks (first (score outcome))
-                       :declarer-trick-cards (filter (lambda (w) (member (card-owner w declarer left dummy right)
-                                                                         '(:declarer :dummy)))
-                                                     winners)
-                       :defense-trick-cards (filter (lambda (w) (member (card-owner w declarer left dummy right)
-                                                                        '(:lho :rho)))
-                                                    winners)
-                       :declarer-ruffs (ruffs-by-suit '(:declarer :dummy) led-suits winners trump-suit
-                                                      declarer left dummy right)
-                       :defense-ruffs (ruffs-by-suit '(:lho :rho) led-suits winners trump-suit
-                                                     declarer left dummy right)
-                       :finesses finesse-events)))
+        (let ((declarer-cards (filter (lambda (w) (member (card-owner w declarer left dummy right)
+                                                          '(:declarer :dummy)))
+                                      winners))
+              (defense-cards (filter (lambda (w) (member (card-owner w declarer left dummy right)
+                                                         '(:lho :rho)))
+                                     winners)))
+            (make-instance 'deal-summary
+                           :trump trump-suit
+                           :show-trump show-trump
+                           :declarer-tricks (length declarer-cards)
+                           :defense-tricks (length defense-cards)
+                           :declarer-trick-cards declarer-cards
+                           :defense-trick-cards defense-cards
+                           :declarer-ruffs (ruffs-by-suit '(:declarer :dummy) led-suits winners trump-suit
+                                                          declarer left dummy right)
+                           :defense-ruffs (ruffs-by-suit '(:lho :rho) led-suits winners trump-suit
+                                                         declarer left dummy right)
+                           :finesses finesse-events))))
 
 ;(test (tricks (peek (play-deal nil (str2hand "♣ AKQ7 ♦ 10 ♥ QJ632 ♠ 832")
 ;                                   (str2hand "♣ J54 ♦ KJ82 ♥ 8 ♠ KQJ95")

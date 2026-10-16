@@ -16,7 +16,7 @@
 -->
 
 <script setup>
-import { ref, computed } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 
 // Suits and ranks
 const suits = ['♠', '♥', '♦', '♣'];
@@ -162,6 +162,18 @@ class Selection {
         }
     }
 
+    // Inverse of formula() for SELECT mode, e.g. "N: ♠ AK9 ♥ AJ83 ♦ A8 ♣ KJ96"
+    static fromFormula(handid, str) {
+        const sel = new Selection(handid);
+        const body = str.includes(": ") ? str.slice(str.indexOf(": ") + 2) : str;
+        for(const [, suit, cards] of body.matchAll(/([♠♥♦♣])\s*([AKQJ0-9]*)/g)) {
+            for(const rank of cards.match(/10|[AKQJ2-9]/g) || []) {
+                sel.data[suit].add(rank);
+            }
+        }
+        return sel;
+    }
+
     isValid() {
         if(this.mode === HandMode.SELECT) {
             return this.total() == 13
@@ -199,6 +211,13 @@ class Hands {
 
     canPush() {
         return this.data.length <= 4 && this.edited().isValid();
+    }
+
+    static fromFormulas(formulas) {
+        const ans = new Hands();
+        ans.data = formulas.map((str, i) => Selection.fromFormula(handIds[i], str));
+        ans.data.push(new Selection(handIds[ans.data.length]));
+        return ans;
     }
 }
 
@@ -245,6 +264,101 @@ async function playSimulation() {
 
     const body = await response.json();
     simulationReport.value = body;
+    if(body["ID"]) {
+        const url = new URL(window.location);
+        url.searchParams.set("sim", body["ID"]);
+        window.history.replaceState(null, "", url);
+    }
+}
+
+// Restore a saved deal simulation given as ?sim=<id>
+async function restoreSimulation(id) {
+    const response = await fetch("api/simdeal/" + encodeURIComponent(id));
+    if(!response.ok) {
+        const text = await response.text();
+        console.error("Fetch failed:", response.status, response.statusText, text);
+        alert(`Cannot restore simulation ${id}: ${response.status}\n${text}`);
+        return;
+    }
+
+    const saved = await response.json();
+    hands.value = Hands.fromFormulas(saved["HANDS"]);
+    simulationReport.value = saved["RESULT"];
+}
+
+onMounted(() => {
+    const id = new URLSearchParams(window.location.search).get("sim");
+    if(id) {
+        restoreSimulation(id);
+    }
+});
+
+// Background colour of each suit (with white text), both in played and remaining cards
+const suitColors = { '♠': '#1e3a8a', '♥': '#dc2626', '♦': '#ea580c', '♣': '#15803d' };
+
+const seats = ['N', 'E', 'S', 'W'];
+
+// Hand computed from remaining cards has no proper id; it's always the last one (W)
+function declarerSeat(axis) {
+    return seats.includes(axis['DECLARER']) ? axis['DECLARER'] : 'W';
+}
+
+function emptySeats() {
+    return Object.fromEntries(seats.map((seat) => [seat, []]));
+}
+
+// Splits played cards of one contract into sequences of tricks and, within
+// each, distributes them to the hands they come from. First trick is led by
+// declarer's LHO; WINNERS holds position of each trick's winner relative to
+// that trick's leader, who leads the next one.
+// Returns [{ played:    { N: [{card, trick, lead}...], E: ..., S: ..., W: ... },
+//            remaining: { N: { '♠': ['A', 'K'...], '♥': ...}, E: ... },
+//            comment:   ['line'...] }...]
+// where remaining are cards held before the sequence is played.
+function playSequences(axis) {
+    var leader = (seats.indexOf(declarerSeat(axis)) + 1) % 4;
+    var trickNo = 0;
+
+    const played = axis['SEQUENCES'].map((seq) => {
+        const ans = emptySeats();
+        seq['TRICKS'].forEach((trick, i) => {
+            trick.forEach((card, pos) => {
+                ans[seats[(leader + pos) % 4]].push({
+                    card: card,
+                    trick: trickNo,
+                    lead: pos == 0
+                });
+            });
+            leader = (leader + seq['WINNERS'][i]) % 4;
+            trickNo++;
+        });
+        return ans;
+    });
+
+    // Cards held before a sequence are those played in it and later
+    return played.map((seq, k) => {
+        const remaining = Object.fromEntries(seats.map((seat) => [
+            seat,
+            Object.fromEntries(suits.map((suit) => [suit, []]))
+        ]));
+        for(const later of played.slice(k)) {
+            for(const seat of seats) {
+                for(const { card } of later[seat]) {
+                    remaining[seat][card[0]].push(card.slice(1));
+                }
+            }
+        }
+        for(const seat of seats) {
+            for(const suit of suits) {
+                remaining[seat][suit].sort((a, b) => ranks.indexOf(a) - ranks.indexOf(b));
+            }
+        }
+        return {
+            played: seq,
+            remaining: remaining,
+            comment: axis['SEQUENCES'][k]['COMMENT'].split('\n').filter(Boolean)
+        };
+    });
 }
 
 function probabilityPercent(x) {
@@ -356,7 +470,8 @@ async function runSimulation() {
   <div class="min-h-screen flex flex-col items-center justify-center bg-gray-100 text-gray-800">
 
     <!-- Pushed hands view -->
-    <div class="bg-white shadow-lg rounded-2xl p-6 w-96 mb-4"
+    <div class="bg-white shadow-lg rounded-2xl p-6 mb-4"
+         :class="simulationReport && simulationReport['SCORE'] ? 'w-fit max-w-full' : 'w-96'"
          v-if="hands.hasPushed()">
       <h3 class="text-center">Pushed hands:</h3>
       <ul>
@@ -402,23 +517,65 @@ async function runSimulation() {
       <!-- 2. Deal simulation -->
       <div v-if="simulationReport && simulationReport['SCORE']" class="mt-8">
         <p>Probable outcome is {{simulationReport['SCORE'][0]}} vs defence {{simulationReport['SCORE'][1]}}</p>
-        <div class="grid grid-cols-2 mt-4">
+        <div class="flex flex-col gap-8 mt-4">
           <div v-for="axis in simulationReport['POWER']">
-            <p v-for="(value, key) in axis"
-               :key="key"
-               class="text-center">
-              <b>{{key}}</b>:
-              <div v-if="key === 'COMMENT'">
-                <p v-for="par in value.split('\n')" class="mt-2">
-                    {{ par }}
-                </p>
-              </div>
-              <pre v-else-if="key === 'TRICKS'">{{
-                 value.map((trick) => trick.join(" "))
-                      .join("\n") }}
-              </pre>
-              <span v-else>{{value}}</span>
+            <p class="text-center text-lg">
+              <b>{{ axis['TRUMP'] }}</b> by <b>{{ declarerSeat(axis) }}</b>:
+              {{ axis['SCORE'] }} tricks
             </p>
+
+            <!-- Play split into short sequences of tricks. Each one shows cards
+                 held before it, then table view of the sequence: one row of
+                 played cards per hand, N on top, W and E in the middle, S at the
+                 bottom. Column tells the trick, colour the suit, underlined
+                 card led the trick. Comment on the sequence goes below. -->
+            <div v-for="(seq, k) in playSequences(axis)" :key="k" class="mt-4 border-t pt-4">
+              <div class="flex flex-wrap justify-center items-center gap-x-10 gap-y-2">
+                <!-- Cards held before the sequence -->
+                <div class="grid grid-cols-3 gap-x-4 gap-y-1 items-center">
+                  <template v-for="(seat, cell) in [null, 'N', null, 'W', null, 'E', null, 'S', null]"
+                            :key="cell">
+                    <div v-if="seat" class="font-mono text-sm leading-tight">
+                      <div class="font-bold"
+                           :class="{ 'text-blue-700': seat === declarerSeat(axis) }">{{ seat }}</div>
+                      <div v-for="suit in suits" :key="suit"
+                           class="whitespace-nowrap rounded px-1 mt-0.5 text-white"
+                           :style="{ background: suitColors[suit] }">
+                        {{ suit }} {{ seq.remaining[seat][suit].join('') || '—' }}
+                      </div>
+                    </div>
+                    <div v-else></div>
+                  </template>
+                </div>
+
+                <!-- Tricks of the sequence -->
+                <div class="flex flex-col items-center gap-2">
+                  <div v-for="row in [['N'], ['W', 'E'], ['S']]"
+                       class="flex gap-10">
+                    <div v-for="seat in row" class="flex items-center gap-1">
+                      <span class="w-6 font-bold text-center"
+                            :class="{ 'text-blue-700': seat === declarerSeat(axis) }">
+                        {{ seat }}
+                      </span>
+                      <span v-for="played in seq.played[seat]"
+                            :key="played.card"
+                            :title="`Trick ${played.trick + 1}`"
+                            class="w-9 rounded py-0.5 text-center font-mono text-sm text-white"
+                            :class="{ 'font-bold underline': played.lead }"
+                            :style="{ background: suitColors[played.card[0]] }">
+                        {{ played.card }}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <!-- w-0 min-w-full: text wraps to the width of cards above
+                   instead of widening the panel -->
+              <div class="w-0 min-w-full text-sm text-center mt-3">
+                <p v-for="line in seq.comment">{{ line }}</p>
+              </div>
+            </div>
           </div>
         </div>
       </div>
