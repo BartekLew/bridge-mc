@@ -454,6 +454,85 @@
                     (write-sim id sim)
                     `(:result ,result))))))
 
+;; Inspecting saved simulations from the REPL. Output of box isn't readable
+;; reliably, so with-probe sends what body prints to a file:
+;;   (with-probe () (sim-show "1u6omxnq4c"))
+;;   (with-probe () (pos-show (sim-pos "1u6omxnq4c" 0)))   ; after all tricks
+;;   (with-probe () (pos-show (sim-pos "1u6omxnq4c" 0 2))) ; after 2 tricks
+
+(defparameter *probe-file* (merge-pathnames "probe.out" (uiop:getcwd)))
+
+(defmacro with-probe ((&optional (file '*probe-file*)) &body body)
+    `(with-open-file (o ,file :direction :output :if-exists :supersede :external-format :utf-8)
+        (handler-case (let ((*standard-output* o)) ,@body (values))
+            (error (e) (format o "ERROR ~A~%" e)))))
+
+(defun ranks-str (ranks)
+    (format nil "~{~A~}" (mapcar (lambda (r) (nth r '(2 3 4 5 6 7 8 9 10 J Q K A))) (reverse ranks))))
+
+; Hand of seat as in test comments: N ♠ 6 ♥ A94 ♦ 9 ♣ Q643
+(defun hand-str (hands seat)
+    (format nil "~A~{ ~A~}" (nth seat *seats*)
+            (loop for suit from 3 downto 0
+                  for ranks = (nth suit (nth seat hands))
+                  when ranks collect (format nil "~A ~A" (suitstr suit) (ranks-str ranks)))))
+
+; Prints tricks numbered from n, leader leading the first; returns the
+; seat to lead after them
+(defun print-tricks (tricks leader trump &optional (n 1) (indent "  "))
+    (loop for tr in tricks
+          for taker = (trick-taker tr leader trump)
+          do (format t "~A~2D. ~A: ~{~A~^ ~} > ~A~%" indent n (nth leader *seats*)
+                     (mapcar #'cardstr tr) (nth taker *seats*))
+             (setf leader taker)
+             (incf n))
+    leader)
+
+; Hands of the deal and the axes (POWER) of saved sim id
+(defun sim-axes (id)
+    (let ((sim (jonathan:parse (or (load-sim id) (error "No simulation ~A" id)))))
+        (values (sim-hands (getf sim :|HANDS|)) (getf (getf sim :|RESULT|) :|POWER|))))
+
+; Prints the deal and play of each axis of sim id, by sequences
+(defun sim-show (id)
+    (multiple-value-bind (hands power) (sim-axes id)
+        (dotimes (seat 4) (format t "~A~%" (hand-str hands seat)))
+        (loop for axis in power
+              for i from 0
+              for trump = (str2suitno (getf axis :|TRUMP|))
+              for leader = (mod (+ (declarer-seat axis) 1) 4)
+              for n = 1
+              do (format t "~%Axis ~D: ~A by ~A, score ~A~:[~;, edited~]~%" i (suitstr trump)
+                         (getf axis :|DECLARER|) (getf axis :|SCORE|) (getf axis :|EDITED|))
+                 (dolist (seq (getf axis :|SEQUENCES|))
+                     (let ((tricks (mapcar (lambda (tr) (mapcar #'str2card tr)) (getf seq :|TRICKS|))))
+                         (format t "  -- ~A~%" (or (getf seq :|COMMENT|) ""))
+                         (setf leader (print-tricks tricks leader trump n))
+                         (incf n (length tricks))))
+                 (format t "  ~A to lead~%" (nth leader *seats*)))))
+
+; Position of axis axis-no of sim id after n of its tricks (all when nil):
+; (hands leader trump)
+(defun sim-pos (id axis-no &optional n)
+    (multiple-value-bind (hands power) (sim-axes id)
+        (let ((axis (or (nth axis-no power) (error "Bad axis ~A" axis-no))))
+            (multiple-value-bind (left leader)
+                    (play-state hands (if n `(:|SEQUENCES| ((:|TRICKS| ,(subseq (axis-tricks axis) 0 n))) ,@axis) axis))
+                (list left leader (str2suitno (getf axis :|TRUMP|)))))))
+
+; Prints position (hands leader trump) as in test comments and as a literal,
+; then its hints, each variant with its plan and tricks
+(defun pos-show (pos)
+    (destructuring-bind (hands leader trump) pos
+        (format t "~A trumps, ~A on lead~%" (suitstr trump) (nth leader *seats*))
+        (dotimes (seat 4) (format t "~A~%" (hand-str hands seat)))
+        (format t "~S ~D ~S~%" hands leader trump)
+        (loop for (plan variants) in (plan-hints hands leader trump)
+              do (format t "~%~A ~S~%" (plan-label plan) plan)
+                 (loop for (v tricks) in variants
+                       do (format t "  ~S~%" v)
+                          (print-tricks tricks leader trump 1 "    ")))))
+
 (defclass result ()
     ((success :reader ok?)
      (val :reader val)))
