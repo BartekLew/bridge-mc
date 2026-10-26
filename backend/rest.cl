@@ -301,11 +301,69 @@
               (getf axis :|DECLARER|)
               (getf axis :|SCORE|))))
 
-; Applies action (pop, clear, split, play or trick) to play of axis axis-no
-; of saved sim id. Returns (:result ...) with the updated result, which gets
-; saved, or (:choices ...) of tricks to choose from, sim left intact. Play
-; adds a trick taken by card, trick adds the explicit one.
-(defun sim-edit (id axis-no action card trick)
+(defparameter *plan-types* '(:draw :draw-all :establish :cash :ruff :void :cross :endplay :force :play :exit))
+
+(defun plan-json (plan)
+    (destructuring-bind (type suit seat) plan
+        `(:type ,(string-downcase type)
+          :suit ,(if suit (suitstr suit) :null)
+          :seat ,(if seat (nth seat *seats*) :null))))
+
+(defun json-plan (obj)
+    (let ((type (find (getf obj :|type|) *plan-types* :test #'string-equal))
+          (suit (getf obj :|suit|))
+          (seat (getf obj :|seat|)))
+        (list (or type (edit-error "Bad plan ~A" obj))
+              (and (stringp suit) (str2suitno suit))
+              (and (stringp seat) (position seat *seats* :test #'equal)))))
+
+(defun plan-label (plan)
+    (destructuring-bind (type suit seat) plan
+        (let ((suit (and suit (suitstr suit)))
+              (seat (and seat (nth seat *seats*))))
+            (ecase type
+                (:draw (format nil "Draw trumps~@[, ending in ~A~]" seat))
+                (:draw-all (format nil "Draw all trumps~@[, ending in ~A~]" seat))
+                (:establish (format nil "Establish ~A~@[, ending in ~A~]" suit seat))
+                (:cash (format nil "Cash ~A~@[, ending in ~A~]" suit seat))
+                (:ruff (format nil "Ruff ~A in ~A" suit seat))
+                (:void (format nil "Void ~A in ~A" suit seat))
+                (:cross (format nil "Cross to ~A" seat))
+                (:endplay (format nil "Throw in ~A with ~A" seat suit))
+                (:force (format nil "Force ~A with ~A" seat suit))
+                (:play (format nil "Play ~A~@[, ending in ~A~]" suit seat))
+                (:exit (format nil "Exit with ~A" suit))))))
+
+; Sequences with tricks of plan added as a new one commented with its label.
+; Next tricks go to a new sequence again, unless all cards are played.
+(defun push-plan (seqs plan tricks trump done)
+    (append (loop for seq in seqs when (getf seq :|TRICKS|) collect seq)
+            (list `(:|TRICKS| ,(mapcar (lambda (tr) (mapcar #'cardstr tr)) tricks)
+                    :|WINNERS| ,(mapcar (lambda (tr) (trick-winner tr trump)) tricks)
+                    :|COMMENT| ,(plan-label plan)))
+            (if (not done) (list (plain-seq nil nil)))))
+
+; Choice of a plan variant (plan tricks), leader leading its first trick
+(defun line-choice (hands leader trump variant)
+    (destructuring-bind (plan tricks) variant
+        `(:plan ,(plan-json plan)
+          :label ,(plan-label plan)
+          :tricks ,(loop for tr in tricks
+                         collect `(:trick ,(mapcar #'cardstr tr)
+                                   :winner ,(trick-winner tr trump)
+                                   :leader ,(nth leader *seats*))
+                         do (setf hands (play-trick hands leader tr)
+                                  leader (trick-taker tr leader trump))))))
+
+; Applies action (pop, clear, split, play, trick, plan or hints) to play of
+; axis axis-no of saved sim id. Returns (:result ...) with the updated
+; result, which gets saved, (:choices ...) of tricks to choose from or
+; (:hints ...) of plans of the side on lead, sim left intact. Play adds a
+; trick taken by card, trick adds the explicit one, or the tricks of a line
+; (as ones of plan, when given), plan the tricks of plan. A plan with
+; several variants (see plan-variants) gives them as choices instead, each a
+; line of tricks with its plan and label.
+(defun sim-edit (id axis-no action card trick &optional plan tricks)
     (let* ((sim (jonathan:parse (or (load-sim id) (edit-error "No simulation ~A" id))))
            (result (getf sim :|RESULT|))
            (power (getf result :|POWER|))
@@ -320,17 +378,60 @@
                         (if (every #'null (apply #'append left))
                             (edit-error "All cards are played")))
                      (push-cards (cards)
-                        (push-trick seqs (mapcar #'cardstr cards) (trick-winner cards trump))))
+                        (push-trick seqs (mapcar #'cardstr cards) (trick-winner cards trump)))
+                     (push-plan-tricks (p tricks)
+                        (push-plan seqs p tricks trump
+                                   (= (* 4 (length tricks))
+                                      (length (apply #'append (apply #'append left))))))
+                     (choices (tricks &rest more)
+                        (return-from sim-edit
+                           `(:choices ,(mapcar (lambda (tr)
+                                                  `(:trick ,(mapcar #'cardstr tr)
+                                                    :winner ,(trick-winner tr trump)))
+                                               tricks)
+                             :leader ,(nth leader *seats*)
+                             ,@more))))
                 (let ((new-seqs
                         (cond ((equal action "pop") (pop-trick seqs))
                               ((equal action "clear") nil)
                               ((equal action "split") (check-open) (split-seqs seqs))
+                              ((equal action "hints")
+                                 (return-from sim-edit
+                                    `(:hints ,(loop for (p variants) in (plan-hints left leader trump)
+                                                    collect `(:plan ,(plan-json p)
+                                                              :label ,(plan-label p)
+                                                              :tricks ,(reduce #'max variants
+                                                                               :key (lambda (v) (length (second v))))
+                                                              :variants ,(length variants))))))
+                              ((equal action "plan")
+                                 (check-open)
+                                 (let* ((p (json-plan plan))
+                                        (variants (or (second (find p (plan-hints left leader trump)
+                                                                    :key #'first :test #'equal))
+                                                      (plan-variants left leader trump p))))
+                                    (cond ((null variants)
+                                             (edit-error "~A gives no trick now" (plan-label p)))
+                                          ((rest variants)
+                                             (return-from sim-edit
+                                                `(:choices ,(mapcar (lambda (v) (line-choice left leader trump v))
+                                                                    variants)
+                                                  :leader ,(nth leader *seats*)
+                                                  :plan ,(plan-json p)
+                                                  :label ,(plan-label p))))
+                                          (t (push-plan-tricks (first (first variants)) (second (first variants)))))))
                               ((equal action "trick")
                                  (check-open)
-                                 (let ((cards (mapcar #'str2card trick)))
-                                    (if (not (legal-trick? left leader cards))
-                                        (edit-error "Trick ~A can't be played now" trick))
-                                    (push-cards cards)))
+                                 (let ((lines (mapcar (lambda (tr) (mapcar #'str2card tr)) (or tricks (list trick))))
+                                       (h left)
+                                       (l leader))
+                                    (dolist (cards lines)
+                                        (if (not (legal-trick? h l cards))
+                                            (edit-error "Trick ~A can't be played now" (mapcar #'cardstr cards)))
+                                        (setf h (play-trick h l cards)
+                                              l (trick-taker cards l trump)))
+                                    (if plan
+                                        (push-plan-tricks (json-plan plan) lines)
+                                        (push-cards (first lines)))))
                               ((equal action "play")
                                  (check-open)
                                  (let* ((c (or (str2card card) (edit-error "Bad card ~A" card)))
@@ -342,13 +443,7 @@
                                                 (edit-error "Card ~A can't be played to this trick" card))
                                              ((and takes (= (length tricks) 1))
                                                 (push-cards (first tricks)))
-                                             (t (return-from sim-edit
-                                                   `(:choices ,(mapcar (lambda (tr)
-                                                                          `(:trick ,(mapcar #'cardstr tr)
-                                                                            :winner ,(trick-winner tr trump)))
-                                                                       tricks)
-                                                     :takes ,(if takes t :false)
-                                                     :leader ,(nth leader *seats*))))))))
+                                             (t (choices tricks :takes (if takes t :false)))))))
                               (t (edit-error "Unknown action ~A" action)))))
                     (setf (getf axis :|SEQUENCES|) new-seqs)
                     (setf (getf axis :|EDITED|) t)
@@ -549,7 +644,8 @@
        (let ((request (jonathan:parse (read-body env))))
           (handler-case (json-response 200 (sim-edit (getf request :|id|) (getf request :|axis|)
                                                      (getf request :|action|) (getf request :|card|)
-                                                     (getf request :|trick|)))
+                                                     (getf request :|trick|) (getf request :|plan|)
+                                                     (getf request :|tricks|)))
             (edit-error (e) (json-response 400 `(:error ,(princ-to-string e)))))))
       ((substr= "/api/simdeal/" path)
        (let ((saved (load-sim (subseq path (length "/api/simdeal/")))))

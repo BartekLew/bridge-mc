@@ -271,6 +271,7 @@ async function playSimulation() {
         url.searchParams.set("sim", body["ID"]);
         window.history.replaceState(null, "", url);
     }
+    loadHints();
 }
 
 // Restore a saved deal simulation given as ?sim=<id>
@@ -288,26 +289,62 @@ async function restoreSimulation(id) {
     simulationReport.value = saved["RESULT"];
     simId.value = id;
     choices.value = null;
+    loadHints();
 }
 
 // Id of the saved simulation shown, which play edits apply to
 const simId = ref(null);
 
 // Tricks offered when the card clicked doesn't take the next trick in a
-// single way: { axis, card, takes, leader, tricks: [{ TRICK, WINNER }...] }
+// single way: { axis, card, takes, leader, tricks: [{ TRICK, WINNER }...] }; or
+// the variants of a plan: { axis, plan, label, leader,
+// tricks: [{ PLAN, LABEL, TRICKS: [{ TRICK, WINNER, LEADER }...] }...] }
 const choices = ref(null);
 
-// Applies an edit (pop, clear, split, play or trick, see sim-edit in
+function simEditRequest(axisNo, action, extra = {}) {
+    return fetch("api/simedit", {
+                    method: "POST",
+                    headers: {
+                        'Accept': 'application/json',
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({ id: simId.value, axis: axisNo, action: action, ...extra })
+                });
+}
+
+// Plans the side on lead can apply, by contract (axis) not played out:
+// [{ PLAN, LABEL, TRICKS, VARIANTS }...], TRICKS being how many the plan plays
+// (in its longest variant), VARIANTS how many ways it can be played
+const hints = ref({});
+
+async function loadHints() {
+    const power = simulationReport.value && simulationReport.value["POWER"];
+    if(!simId.value || !power) {
+        hints.value = {};
+        return;
+    }
+    const all = {};
+    await Promise.all(power.map(async (axis, axisNo) => {
+        if(playDone(axis)) return;
+        const response = await simEditRequest(axisNo, 'hints');
+        if(response.ok) all[axisNo] = (await response.json())["HINTS"];
+    }));
+    hints.value = all;
+}
+
+// Plan as the backend sends it ({ TYPE, SUIT, SEAT }) to one for a request
+function planRequest(plan) {
+    return { type: plan["TYPE"], suit: plan["SUIT"], seat: plan["SEAT"] };
+}
+
+function applyHint(axisNo, hint) {
+    editPlay(axisNo, 'plan', { plan: planRequest(hint["PLAN"]) });
+}
+
+// Applies an edit (pop, clear, split, play, trick or plan, see sim-edit in
 // rest.cl) to play of contract axisNo of the saved simulation
 async function editPlay(axisNo, action, extra = {}) {
-    const response = await fetch("api/simedit", {
-                                    method: "POST",
-                                    headers: {
-                                        'Accept': 'application/json',
-                                        'Content-Type': 'application/json',
-                                    },
-                                    body: JSON.stringify({ id: simId.value, axis: axisNo, action: action, ...extra })
-                                });
+    const response = await simEditRequest(axisNo, action, extra);
     if(!response.ok) {
         const text = await response.text();
         console.error("Fetch failed:", response.status, response.statusText, text);
@@ -322,11 +359,14 @@ async function editPlay(axisNo, action, extra = {}) {
             card: extra.card,
             takes: body["TAKES"],
             leader: body["LEADER"],
+            plan: extra.plan,
+            label: body["LABEL"],
             tricks: body["CHOICES"]
         };
     } else {
         simulationReport.value = body["RESULT"];
         choices.value = null;
+        loadHints();
     }
 }
 
@@ -683,6 +723,21 @@ async function runSimulation() {
                     Tricks go to a new sequence.
                   </template>
                 </p>
+
+                <!-- Plans of the side on lead; a click plays all their tricks -->
+                <div v-if="hints[axisNo] && hints[axisNo].length > 0"
+                     class="flex flex-wrap justify-center gap-2">
+                  <button v-for="hint in hints[axisNo]" :key="hint['LABEL']"
+                          class="px-3 py-1 rounded bg-blue-100 hover:bg-blue-200 text-sm"
+                          :title="hint['VARIANTS'] > 1
+                                  ? `Up to ${hint['TRICKS']} trick(s), ${hint['VARIANTS']} variants to choose from`
+                                  : `Plays ${hint['TRICKS']} trick(s)`"
+                          @click="applyHint(axisNo, hint)">
+                    {{ hint['LABEL'] }}
+                    <span class="text-gray-500">({{ hint['TRICKS'] }}<template
+                      v-if="hint['VARIANTS'] > 1">, {{ hint['VARIANTS'] }} variants</template>)</span>
+                  </button>
+                </div>
                 <div class="grid grid-cols-3 gap-x-4 gap-y-1 items-center">
                   <template v-for="(seat, cell) in [null, 'N', null, 'W', null, 'E', null, 'S', null]"
                             :key="cell">
@@ -709,23 +764,36 @@ async function runSimulation() {
                 <div v-if="choices && choices.axis === axisNo"
                      class="flex flex-col items-center gap-2 border rounded p-3">
                   <p class="text-sm">
-                    <template v-if="choices.takes">
+                    <template v-if="choices.label">
+                      {{ choices.label }}: choose a variant:
+                    </template>
+                    <template v-else-if="choices.takes">
                       {{ choices.card }} can take the trick in several ways:
                     </template>
                     <template v-else>
                       {{ choices.card }} can't take the trick. Choose a trick taken by another card:
                     </template>
                   </p>
+                  <!-- A plan variant is a line of tricks with its label, else a single trick -->
                   <button v-for="(choice, i) in choices.tricks" :key="i"
-                          class="flex gap-3 rounded px-2 py-1 hover:bg-gray-200"
-                          @click="editPlay(axisNo, 'trick', { trick: choice['TRICK'] })">
-                    <span v-for="(card, seat) in trickBySeat(choice['TRICK'], choices.leader)"
-                          :key="seat" class="flex items-center gap-1">
-                      <span class="font-bold text-sm">{{ seat }}</span>
-                      <span class="w-9 rounded py-0.5 text-center font-mono text-sm text-white"
-                            :class="{ 'underline font-bold': seat === choices.leader,
-                                      'ring-2 ring-offset-1 ring-black': card === choice['TRICK'][choice['WINNER']] }"
-                            :style="{ background: suitColors[card[0]] }">{{ card }}</span>
+                          class="flex flex-col items-start gap-1 rounded px-2 py-1 hover:bg-gray-200"
+                          @click="choice['TRICKS']
+                                  ? editPlay(axisNo, 'trick', { tricks: choice['TRICKS'].map(t => t['TRICK']),
+                                                                plan: planRequest(choice['PLAN']) })
+                                  : editPlay(axisNo, 'trick', { trick: choice['TRICK'], plan: choices.plan })">
+                    <span v-if="choice['LABEL'] && choice['LABEL'] !== choices.label"
+                          class="text-sm font-semibold">{{ choice['LABEL'] }}</span>
+                    <span v-for="(line, j) in (choice['TRICKS']
+                                               || [{ ...choice, LEADER: choices.leader }])"
+                          :key="j" class="flex gap-3">
+                      <span v-for="(card, seat) in trickBySeat(line['TRICK'], line['LEADER'])"
+                            :key="seat" class="flex items-center gap-1">
+                        <span class="font-bold text-sm">{{ seat }}</span>
+                        <span class="w-9 rounded py-0.5 text-center font-mono text-sm text-white"
+                              :class="{ 'underline font-bold': seat === line['LEADER'],
+                                        'ring-2 ring-offset-1 ring-black': card === line['TRICK'][line['WINNER']] }"
+                              :style="{ background: suitColors[card[0]] }">{{ card }}</span>
+                      </span>
                     </span>
                   </button>
                   <button class="text-sm text-gray-600 underline" @click="choices = null">Cancel</button>

@@ -2393,7 +2393,7 @@ W: ♣ A1087 ♦ KQ5 ♥ 762 ♠ Q102"))
 (defun play-through (trump suit hands &key just-tops)
     (labels ((self (&rest hands)
                 (apply #'best-outcome
-                       (mapcar (curry #'apply 
+                       (mapcar (curry #'apply
                                     (lambda (top hands)
                                         (or (do-next (apply #'simple-trick
                                                             `(,trump ,suit ,@hands :use-highest ,top))
@@ -3557,15 +3557,41 @@ W: ♣ A1087 ♦ KQ5 ♥ 762 ♠ Q102"))
                                                      (if (> i 0) (first (first trick))))
                                    :test #'equal)))))
 
+; Card to discard from suits: the lowest one outside trumps and suits keep
+; below tops, the highest ranks of the opponents by suit; else the lowest
+; one in keep, else the lowest one but a trump, else any
+(defun keep-discard (suits keep tops trump)
+    (let ((cards (legal-cards suits nil)))
+        (flet ((lowest (test)
+                  (first (sort (remove-if-not test cards) #'< :key #'second))))
+            (or (lowest (lambda (c) (and (not (eql (first c) trump))
+                                         (not (member (first c) keep))
+                                         (< (second c) (nth (first c) tops)))))
+                (lowest (lambda (c) (and (not (eql (first c) trump)) (member (first c) keep))))
+                (lowest (lambda (c) (not (eql (first c) trump))))
+                (lowest #'identity)))))
+
 ; Card of hand not trying to take the trick: the lowest one in led suit or
-; else the lowest one of weak-suit. Others are hands of other seats.
+; else the lowest one of weak-suit, unless it is a master and another card
+; isn't (see keep-discard). Others are hands of other seats.
 (defun duck-card (suits led trump others)
     (if (nth led suits)
         (list led (first (nth led suits)))
-        (let ((suit (weak-suit (mkhand (mapcar #'copy-list suits))
-                               (make-instance 'trick :suit led :trump trump
-                                              :remaining (mapcar (lambda (o) (mkhand (copy-tree o))) others)))))
-            (list suit (first (nth suit suits))))))
+        (let* ((suit (weak-suit (mkhand (mapcar #'copy-list suits))
+                                (make-instance 'trick :suit led :trump trump
+                                               :remaining (mapcar (lambda (o) (mkhand (copy-tree o))) others))))
+               (card (list suit (first (nth suit suits))))
+               (tops (loop for s from 0 below 4
+                           collect (reduce #'max (loop for o in others append (nth s o)) :initial-value -1))))
+            (if (> (second card) (nth suit tops))
+                (keep-discard suits nil tops trump)
+                card))))
+
+; S ♣ A ♥ J109 on a diamond keeps his ace
+(test (duck-card '((12) nil (7 8 9) nil) 1 3
+                 '((nil (5) (1 2 11) nil) (nil (11) (0 10 12) nil) (nil (3 4) (4 5) nil)))
+      '(2 7)
+      equal)
 
 ; Groups of equivalent cards of a hand, as no card of others falls between
 ; them, each given by its lowest card
@@ -3582,32 +3608,75 @@ W: ♣ A1087 ♦ KQ5 ♥ 762 ♠ Q102"))
       '((3 2) (3 6) (3 9))
       equal)
 
-; Trick (cards from leader) led with card lead, in which seat w takes the
-; trick with card win, fixed-seat plays fixed-card, force-seat plays
-; force-card and others duck. Nil when a card isn't legal, win doesn't take
-; the trick or an opponent of w playing after it (and not fixed) could beat it.
-(defun forced-trick (hands leader trump lead w win &key fixed-seat fixed-card force-seat force-card)
-    (let* ((seats (loop for i from 0 below 4 collect (mod (+ leader i) 4)))
-           (led (first lead))
-           (trick (loop for seat in seats
-                        for i from 0
-                        collect (cond ((= i 0) lead)
-                                      ((= seat w) win)
-                                      ((eql seat fixed-seat) fixed-card)
-                                      ((eql seat force-seat) force-card)
-                                      (t (duck-card (nth seat hands) led trump
-                                                    (loop for s in seats
-                                                          unless (= s seat)
-                                                          collect (nth s hands)))))))
-           (wpos (position w seats)))
-        (and (legal-trick? hands leader trick)
-             (= (trick-winner trick trump) wpos)
-             (loop for seat in (nthcdr (+ wpos 1) seats)
-                   never (and (oddp (- seat w))
-                              (not (eql seat fixed-seat))
-                              (find-if (lambda (card) (card-beats? card win led trump))
-                                       (legal-cards (nth seat hands) led))))
-             trick)))
+(defun trick-seats (leader)
+    (loop for i from 0 below 4 collect (mod (+ leader i) 4)))
+
+; Trick (cards from leader) in which seats of plays, an alist (seat . card)
+; including the leader, play their cards and others duck
+(defun build-trick (hands leader trump plays)
+    (let* ((seats (trick-seats leader))
+           (led (first (cdr (assoc leader plays)))))
+        (loop for seat in seats
+              collect (or (cdr (assoc seat plays))
+                          (duck-card (nth seat hands) led trump
+                                     (loop for s in seats
+                                           unless (= s seat)
+                                           collect (nth s hands)))))))
+
+; Could an opponent of seat w playing after it, other than fixed-seat, beat
+; card best with another card?
+(defun beatable? (hands leader trump trick w best fixed-seat)
+    (let ((seats (trick-seats leader))
+          (led (first (first trick))))
+        (loop for seat in (nthcdr (+ (position w seats) 1) seats)
+              thereis (and (oddp (- seat w))
+                           (not (eql seat fixed-seat))
+                           (find-if (lambda (card) (card-beats? card best led trump))
+                                    (legal-cards (nth seat hands) led))))))
+
+; Could an opponent of seat w playing before it, other than the leader and
+; fixed-seat, beat card win?
+(defun beaten-before? (hands leader trump trick w win fixed-seat)
+    (let ((seats (trick-seats leader))
+          (led (first (first trick))))
+        (loop for seat in (rest (subseq seats 0 (position w seats)))
+              thereis (and (oddp (- seat w))
+                           (not (eql seat fixed-seat))
+                           (find-if (lambda (card) (card-beats? card win led trump))
+                                    (legal-cards (nth seat hands) led))))))
+
+; Does the side of seat w take trick for sure, whatever opponents playing
+; after w do?
+(defun side-holds? (hands leader trump trick w fixed-seat)
+    (let ((p (trick-winner trick trump)))
+        (and (evenp (- (nth p (trick-seats leader)) w))
+             (not (beatable? hands leader trump trick w (nth p trick) fixed-seat)))))
+
+; Trick in which seat w takes the trick with card win, plays as in
+; build-trick. Nil when a card isn't legal, win doesn't take the trick or it
+; isn't needed: w's side would take it for sure with w's cheaper card or
+; w's duck card as well (unless free). When certain, an opponent of w
+; playing after it (and not fixed) mustn't be able to beat win; otherwise he
+; ducks. When certain is :strict, neither may one playing before it.
+(defun winning-trick (hands leader trump w win plays fixed-seat certain &optional free)
+    (flet ((trick-with (card)
+              (let ((trick (build-trick hands leader trump (acons w card plays))))
+                  (and (legal-trick? hands leader trick) trick))))
+        (let ((trick (trick-with win)))
+            (and trick
+                 (= (trick-winner trick trump) (position w (trick-seats leader)))
+                 (not (and certain (beatable? hands leader trump trick w win fixed-seat)))
+                 (not (and (eq certain :strict) (beaten-before? hands leader trump trick w win fixed-seat)))
+                 (or free (= w leader)
+                     (loop for alt in (list (cheaper-card hands w win)
+                                            (duck-card (nth w hands) (first (first trick)) trump
+                                                       (loop for s from 0 below 4
+                                                             unless (= s w)
+                                                             collect (nth s hands))))
+                           never (and alt (not (equal alt win))
+                                      (let ((tr (trick-with alt)))
+                                          (and tr (side-holds? hands leader trump tr w fixed-seat))))))
+                 trick))))
 
 ; The highest card of seat w lower than win in its suit and not equivalent
 ; to it, i.e. a card of others falls between them
@@ -3628,69 +3697,113 @@ W: ♣ A1087 ♦ KQ5 ♥ 762 ♠ Q102"))
       '(3 7)
       equal)
 
-; Tricks in which seat w takes the trick with card win, built by
-; forced-trick, but with win played only when needed. When a cheaper card of
-; w would take the trick as well, an opponent of w playing before it forces
-; win with the lowest card he can (leading it, if he leads), which gives a
-; trick per such opponent. If none can, the trick stays as it is.
-(defun natural-tricks (hands leader trump lead w win fixed-seat fixed-card)
-    (let ((cheaper (and (/= w leader) (cheaper-card hands w win))))
-        (labels ((trick (win lead &optional force-seat force-card)
-                    (forced-trick hands leader trump lead w win
-                                  :fixed-seat fixed-seat :fixed-card fixed-card
-                                  :force-seat force-seat :force-card force-card))
-                 (forcing (lead &optional force-seat force-card)
-                    (and (not (and cheaper (trick cheaper lead force-seat force-card)))
-                         (trick win lead force-seat force-card))))
-            (let ((base (trick win lead)))
-                (cond ((not base) nil)
-                      ((forcing lead) (list base))
-                      (t (or (loop for i from 0 below 4
-                                   for h = (mod (+ leader i) 4)
-                                   until (= h w)
-                                   when (and (oddp (- h w)) (not (eql h fixed-seat)))
-                                   append (let ((ans (if (= h leader)
-                                                         (loop for r in (nth (first win) (nth h hands))
-                                                               thereis (forcing (list (first win) r)))
-                                                         (loop for c in (legal-cards (nth h hands) (first lead))
-                                                               thereis (forcing lead h c)))))
-                                             (and ans (list ans))))
-                             (list base))))))))
+; Tricks led with card lead in which seat w takes the trick with card win,
+; fixed-seat playing fixed-card (see winning-trick). Others duck or, if
+; win wouldn't be needed then, an opponent of w playing before it forces
+; win with the cheapest card he can, which gives a trick per such opponent.
+; When free, win needn't be needed and others only duck.
+(defun lead-tricks (hands leader trump lead w win fixed-seat fixed-card certain &optional free)
+    (let ((plays (cons (cons leader lead)
+                       (if (and fixed-seat (/= fixed-seat leader))
+                           (list (cons fixed-seat fixed-card))))))
+        (flet ((trick (&optional force)
+                  (winning-trick hands leader trump w win (append force plays) fixed-seat certain free)))
+            (let ((base (trick)))
+                (if (or base free)
+                    (and base (list base))
+                    (loop for h in (trick-seats leader)
+                          until (= h w)
+                          when (and (/= h leader) (oddp (- h w)) (not (eql h fixed-seat)))
+                          append (let ((ans (loop for c in (legal-cards (nth h hands) (first lead))
+                                                  thereis (trick (list (cons h c))))))
+                                    (and ans (list ans)))))))))
 
 (defun lowest-cards (suits)
     (loop for s from 0 below 4
           when (nth s suits)
           collect (list s (first (nth s suits)))))
 
+; Cards worth leading: the lowest one of each suit and the highest one of
+; each group of equivalent cards
+(defun lead-cards (suits others)
+    (loop for s from 0 below 4
+          append (let ((other-ranks (loop for o in others append (nth s o))))
+                     (loop for (r next) on (nth s suits)
+                           for i from 0
+                           when (or (= i 0) (not next) (find-if (lambda (o) (< r o next)) other-ranks))
+                           collect (list s r)))))
+
+(test (lead-cards '(nil nil (6 8 9) (1 3 4 6 9)) '((nil nil (4 5 7 10) nil) (nil nil (0 3) (0 7 8 11))))
+      '((2 6) (2 9) (3 1) (3 6) (3 9))
+      equal)
+
+(defun other-hands (hands seat)
+    (loop for s from 0 below 4 unless (= s seat) collect (nth s hands)))
+
+; Tricks in which seat w takes the trick with card win, fixed-seat playing
+; fixed-card, led in suit when given. The leader leads the lowest card or the
+; top of a sequence in a suit unless his card is the fixed or the winning
+; one; a higher card only when the lowest one in its suit doesn't give the
+; same trick.
+(defun win-tricks (hands leader trump w win certain &key fixed-seat fixed-card suit free)
+    (flet ((lowered (trick)
+              (cons (list (first (first trick))
+                          (first (nth (first (first trick)) (nth leader hands))))
+                    (rest trick))))
+        (let* ((leads (cond ((eql leader fixed-seat) (list fixed-card))
+                            ((= leader w) (list win))
+                            (t (lead-cards (nth leader hands) (other-hands hands leader)))))
+               (ans (loop for lead in leads
+                          when (or (not suit) (= (first lead) suit))
+                          append (lead-tricks hands leader trump lead w win fixed-seat fixed-card
+                                              certain free))))
+            (remove-if (lambda (tr)
+                          (and (not (equal (lowered tr) tr))
+                               (member (lowered tr) ans :test #'equal)))
+                       ans))))
+
+; Tricks taken by cards of ws-wins, a list of (seat card...), see
+; win-tricks, which pass test, cards of the side free-side (0 for NS, 1 for
+; EW) being free. Tricks opponents could take by not ducking (a finesse
+; working) are given only when there are no others, unless the free side
+; ducks: it may do so whenever it likes. With certain-only never, and no
+; opponent may beat the winning card at all (:strict in winning-trick).
+(defun taking-tricks (hands leader trump ws-wins &key fixed-seat fixed-card suit free-side (test #'identity)
+                                                      certain-only)
+    (loop for certain in (if certain-only '(t) '(t nil))
+          thereis (remove-duplicates
+                      (loop for (w . wins) in ws-wins
+                            append (loop for win in wins
+                                         append (remove-if-not test
+                                                    (win-tricks hands leader trump w win
+                                                                (and certain
+                                                                     (or (not free-side)
+                                                                         (= (mod w 2) free-side))
+                                                                     (if certain-only :strict t))
+                                                                :fixed-seat fixed-seat :fixed-card fixed-card
+                                                                :suit suit
+                                                                :free (eql (mod w 2) free-side)))))
+                      :test #'equal :from-end t)))
+
+; Groups of equivalent cards of each seat except skip, as taking-tricks takes them
+(defun seat-groups (hands &optional skip)
+    (loop for w from 0 below 4
+          unless (eql w skip)
+          collect (cons w (card-groups (nth w hands) (other-hands hands w)))))
+
 ; Tricks (cards from leader) in which seat plays card, the user wanting it
 ; to take the trick. Second value tells if card takes them. If it does,
 ; there's a trick for each way it can (e.g. ruffing different suits led).
 ; Otherwise there's a trick for each other card that could take it, one per
-; group of equivalent cards. The leader leads the lowest card of a suit
-; unless his card is the chosen or the winning one.
+; group of equivalent cards.
 (defun card-tricks (hands leader trump seat card)
-    (labels ((leads (w win)
-                (cond ((= leader seat) (list card))
-                      ((= leader w) (list win))
-                      (t (lowest-cards (nth leader hands)))))
-             (tricks (w wins)
-                (remove-duplicates
-                    (loop for win in wins
-                          append (loop for lead in (leads w win)
-                                       append (natural-tricks hands leader trump lead w win seat card)))
-                    :test #'equal :from-end t)))
-        (let ((own (tricks seat (list card))))
-            (if own
-                (values own t)
-                (values (remove-duplicates
-                            (loop for w from 0 below 4
-                                  unless (= w seat)
-                                  append (tricks w (card-groups (nth w hands)
-                                                                (loop for s from 0 below 4
-                                                                      unless (= s w)
-                                                                      collect (nth s hands)))))
-                            :test #'equal :from-end t)
-                        nil)))))
+    (let ((own (taking-tricks hands leader trump (list (list seat card))
+                              :fixed-seat seat :fixed-card card)))
+        (if own
+            (values own t)
+            (values (taking-tricks hands leader trump (seat-groups hands seat)
+                                   :fixed-seat seat :fixed-card card)
+                    nil))))
 
 ; J854 Q62 AK7 1093, the 2 chosen: J takes it, or the K or the 9 after 4 led
 (test (multiple-value-list
@@ -3701,20 +3814,20 @@ W: ♣ A1087 ♦ KQ5 ♥ 762 ♠ Q102"))
       equal)
 
 ; AK107 Q96 J43 852, S leading, E's Q chosen: the 9 would do after low cards,
-; so S leads the J or N finesses the 10
+; so N finesses the 10 or S leads the J
 (test (multiple-value-list
           (card-tricks '((nil nil nil (5 8 11 12)) (nil nil nil (4 7 10))
                          (nil nil nil (1 2 9)) (nil nil nil (0 3 6)))
                        2 nil 1 '(3 10)))
-      '((((3 9) (3 0) (3 5) (3 10)) ((3 1) (3 0) (3 8) (3 10))) t)
+      '((((3 1) (3 0) (3 8) (3 10)) ((3 9) (3 0) (3 5) (3 10))) t)
       equal)
 
-; The K takes it when 4 is led
+; The K takes it when 4 is led, or the J led and covered by the Q
 (test (multiple-value-list
           (card-tricks '((nil nil nil (2 3 6 9)) (nil nil nil (0 4 10))
                          (nil nil nil (5 11 12)) (nil nil nil (1 7 8)))
                        0 nil 2 '(3 11)))
-      '((((3 2) (3 0) (3 11) (3 1))) t)
+      '((((3 2) (3 0) (3 11) (3 1)) ((3 9) (3 10) (3 11) (3 1))) t)
       equal)
 
 ; Hearts trumps, the third hand void in clubs and diamonds can ruff either
@@ -3722,4 +3835,1104 @@ W: ♣ A1087 ♦ KQ5 ♥ 762 ♠ Q102"))
                      (nil nil (0) (5)) ((4 5) (4 5) nil nil))
                    0 2 2 '(2 0))
       '(((0 0) (0 2) (2 0) (0 4)) ((1 0) (1 2) (2 0) (1 4)))
+      equal)
+
+; Hearts trumps, W leading: W ♠4 ♥J108 ♦J8653, N ♠107 ♥Q976 ♣854,
+; E ♥AK5432 ♦10 ♣Q6, S ♠J9 ♦K92 ♣J1097. E's A is needed only when N plays
+; over the lead (not when ruffing a spade); W's J takes it when N ducks.
+(defparameter *finesse-hands*
+    '(((2 3 6) nil (4 5 7 10) (5 8)) ((4 10) (8) (0 1 2 3 11 12) nil)
+      ((5 7 8 9) (0 7 11) nil (7 9)) (nil (1 3 4 6 9) (6 8 9) (2))))
+
+(test (multiple-value-list (card-tricks *finesse-hands* 3 2 1 '(2 12)))
+      '((((2 6) (2 7) (2 12) (1 0)) ((2 9) (2 10) (2 12) (1 0))) t)
+      equal)
+
+(test (multiple-value-list (card-tricks *finesse-hands* 3 2 3 '(2 9)))
+      '((((2 9) (2 4) (2 0) (1 0))) t)
+      equal)
+
+;; ===========================
+;; Plans of play
+;; ===========================
+; A plan is a goal of the side on lead reached by a sequence of tricks, given
+; as (type suit seat): (:draw trump), (:draw-all trump), (:establish suit),
+; (:cash suit), (:ruff suit seat), (:void suit seat), (:cross nil seat),
+; (:endplay suit seat), (:force suit seat), (:play suit) or (:exit suit).
+; Drawing trumps keeps the lead, drawing all of them gives it up for their
+; master trumps as well. An exit gives the lead up in a suit costing least. Cashing, establishing, drawing and playing a suit are played by the
+; suit solver (double dummy within the suit): cashing counts sure tricks,
+; opponents ruffing, establishing tricks by ranks. A ruff, void or cross
+; trick is one of taking-tricks that makes progress towards the goal, the
+; best by plan-key; only sure ones. The sequence ends when the goal is
+; reached, no trick makes progress or the other side takes a trick. When the
+; defence can play the first trick in several ways (an opponent ruffing or
+; not), they are choices; such a later trick ends the sequence. An endplay is
+; the single trick throwing seat in (see Endplays), a force the single trick
+; leading a suit for seat to ruff (force-tricks).
+
+(defun side-seats (side)
+    (list side (+ side 2)))
+
+(defun suit-ranks (hands seats suit)
+    (loop for s in seats append (nth suit (nth s hands))))
+
+;; Suit solver
+; Double dummy play of a single suit: h holds the ranks of each seat in it,
+; tr their trumps when void hands may ruff (else four nils). Side maximizes
+; its tricks in the suit, the opponents minimize them. Who leads each round
+; depends on mode:
+;   :cash   side leads, its tricks counted until it loses one
+;   :run    as :cash, but the hand taking a trick leads the next one
+;   :ours   side leads every round, from a hand of its choice
+;   :theirs the opponents lead every round, then side once they are out
+;   :stuck  the first leader leads every round while he can
+; Entries are never checked. A void hand discards (nil) or ruffs; one of
+; side only overruffs an opponent (ruffing its own winners is a ruff plan).
+
+(defparameter *suit-solve-cache* (make-hash-table :test 'equal))
+
+; Ranks worth trying: the lowest one of each run that no rank of all falls into
+(defun rank-choices (ranks all)
+    (let ((prev nil))
+        (loop for r in ranks
+              when (or (not prev) (find-if (lambda (o) (< prev o r)) all))
+              collect r
+              do (setf prev r))))
+
+; Moves of seat to a trick: (0 . rank) in the suit, (1 . rank) a ruff, nil
+; a discard. Ranks are equivalent unless one of h0 or tr0, the holdings
+; when the trick started, falls between them.
+(defun suit-moves (h tr seat leading h0 tr0)
+    (cond ((nth seat h) (mapcar (lambda (r) (cons 0 r)) (rank-choices (nth seat h) (apply #'append h0))))
+          (leading nil)
+          (t (cons nil (mapcar (lambda (r) (cons 1 r)) (rank-choices (nth seat tr) (apply #'append tr0)))))))
+
+(defun move> (m top)
+    (and m (or (null top)
+               (> (car m) (car top))
+               (and (= (car m) (car top)) (> (cdr m) (cdr top))))))
+
+(defun without-rank (lists seat r)
+    (loop for l in lists
+          for s from 0
+          collect (if (= s seat) (remove r l) l)))
+
+; Tricks of side in the suit with mode, leader leading the first trick, and
+; that trick's best moves from leader, cheaper ones first on equal value.
+; Forced, an alist (seat . kind), limits the moves of seats to the first
+; trick: kind is a move, :ruff or :discard. An entry (:prefer . seat)
+; makes side, of moves equally good, choose ones by which seat takes it.
+(defun suit-solve (h tr side leader mode &optional forced)
+    (labels ((value (h tr leader)
+                (let ((key (list mode side leader h tr)))
+                    (multiple-value-bind (v found) (gethash key *suit-solve-cache*)
+                        (if found
+                            v
+                            (setf (gethash key *suit-solve-cache*) (values (play h tr leader nil)))))))
+             (best (h tr seats maxp)
+                (let ((vs (loop for s in seats when (nth s h) collect (value h tr s))))
+                    (and vs (reduce (if maxp #'max #'min) vs))))
+             ; Values inside are tricks * 14 + the run of tricks side takes
+             ; first, so that of equal tricks it takes them early (in
+             ; :cash and :run just tricks)
+             (add-trick (won v)
+                (if won (+ v 15) (* 14 (floor v 14))))
+             (after (h tr leader winner)
+                (let ((won (= (mod winner 2) side))
+                      (ours (side-seats side)))
+                    (ecase mode
+                        (:cash (if won (+ 1 (or (best h tr ours t) 0)) 0))
+                        (:run (if won (+ 1 (if (nth winner h) (value h tr winner) 0)) 0))
+                        (:ours (add-trick won (or (best h tr ours t) 0)))
+                        (:theirs (add-trick won (or (best h tr (side-seats (- 1 side)) nil) (best h tr ours t) 0)))
+                        (:stuck (add-trick won (if (nth leader h) (value h tr leader) 0))))))
+             (allowed (m kind)
+                (cond ((null kind) t)
+                      ((eq kind :ruff) (and m (= (car m) 1)))
+                      ((eq kind :discard) (null m))
+                      (t (equal m kind))))
+             (play (h0 tr0 leader forced &aux (prefer (cdr (assoc :prefer forced))))
+                (labels ((ducked? (top top-seat)
+                            ; Did side take the trick only as an opponent
+                            ; after its winner ducked? Not a sure trick, so
+                            ; cashing ends without it.
+                            (and (= (mod top-seat 2) side) (= (car top) 0)
+                                 (some (lambda (s)
+                                           (and (/= (mod s 2) side)
+                                                (find-if (lambda (r) (> r (cdr top))) (nth s h0))))
+                                       (rest (member top-seat (trick-seats leader))))))
+                         (trick (h tr seats moves top top-seat)
+                            (if (null seats)
+                                (values (if (and (member mode '(:cash :run)) (ducked? top top-seat))
+                                            0
+                                            (after h tr leader top-seat))
+                                        (reverse moves))
+                                (let ((s (first seats))
+                                      (bv nil)
+                                      (bm nil))
+                                    (dolist (m (suit-moves h tr s (= s leader) h0 tr0))
+                                        (when (and (allowed m (cdr (assoc s forced)))
+                                                   (or (not m) (= (car m) 0) (/= (mod s 2) side)
+                                                       (= (car top) 1)))
+                                            (multiple-value-bind (v ms)
+                                                    (trick (if (and m (= (car m) 0)) (without-rank h s (cdr m)) h)
+                                                           (if (and m (= (car m) 1)) (without-rank tr s (cdr m)) tr)
+                                                           (rest seats) (cons m moves)
+                                                           (if (move> m top) m top)
+                                                           (if (move> m top) s top-seat))
+                                                (when (and v (or (null bv)
+                                                                 (if (= (mod s 2) side)
+                                                                     (or (> v bv)
+                                                                         (and (= v bv) prefer
+                                                                              (eql (moves-taker ms leader) prefer)
+                                                                              (not (eql (moves-taker bm leader) prefer))))
+                                                                     (< v bv))))
+                                                    (setf bv v bm ms)))))
+                                    (values bv bm)))))
+                    (trick h0 tr0 (trick-seats leader) nil nil nil))))
+        (if (nth leader h)
+            (multiple-value-bind (v moves) (play h tr leader forced)
+                (values (if (or (null v) (member mode '(:cash :run))) v (floor v 14)) moves))
+            (values 0 nil))))
+
+; Seat taking a trick of suit-solve moves (from leader)
+(defun moves-taker (moves leader)
+    (let ((best 0))
+        (loop for m in moves
+              for i from 0
+              when (move> m (nth best moves)) do (setf best i))
+        (nth best (trick-seats leader))))
+
+(defun suit-holdings (hands suit)
+    (mapcar (lambda (hand) (nth suit hand)) hands))
+
+; suit-solve on hands, void hands ruffing when ruffs (unless suit is trump)
+(defun solve-suit (hands side suit trump leader mode &optional ruffs forced)
+    (if (> (hash-table-count *suit-solve-cache*) 200000) (clrhash *suit-solve-cache*))
+    (suit-solve (suit-holdings hands suit)
+                (if (and ruffs trump (/= suit trump)) (suit-holdings hands trump) (list nil nil nil nil))
+                side leader mode forced))
+
+; Sure tricks of side in suit, leader leading, before it loses the lead;
+; opponents ruff unless not ruffs
+(defun cash-count (hands side suit trump leader &optional (ruffs t))
+    (values (solve-suit hands side suit trump leader :cash ruffs)))
+
+; Tricks of side in suit by ranks when it does all the leading, from leader
+; first
+(defun rank-count (hands side suit leader)
+    (values (solve-suit hands side suit nil leader :ours)))
+
+; Tricks of side in suit by ranks when the opponents lead it while they can
+(defun theirs-count (hands side suit)
+    (let* ((h (suit-holdings hands suit))
+           (holders (lambda (seats) (remove-if-not (lambda (s) (nth s h)) seats)))
+           (opps (funcall holders (side-seats (- 1 side))))
+           (seats (or opps (funcall holders (side-seats side))))
+           (vs (mapcar (lambda (s) (values (suit-solve h (list nil nil nil nil) side s :theirs))) seats)))
+        (cond ((null vs) 0)
+              (opps (reduce #'min vs))
+              (t (reduce #'max vs)))))
+
+; Tricks seat's side loses in suit by leading it from seat rather than
+; letting the opponents lead it, by ranks. When stuck, seat has to lead it
+; every round.
+(defun lead-loss (hands seat suit &optional stuck)
+    (let ((side (mod seat 2)))
+        (- (theirs-count hands side suit)
+           (values (solve-suit hands side suit nil seat (if stuck :stuck :ours))))))
+
+; Tricks side can make in suit by ranks beyond its sure ones, leader leading
+; (opponents ruffing the sure ones unless not ruffs)
+(defun establish-gain (hands side suit trump leader &optional (ruffs t))
+    (if (nth suit (nth leader hands))
+        (- (rank-count hands side suit leader) (cash-count hands side suit trump leader ruffs))
+        0))
+
+; The best establish-gain of side in suit by ranks only, from either hand
+(defun side-gain (hands side suit)
+    (loop for seat in (side-seats side)
+          maximize (establish-gain hands side suit nil seat nil)))
+
+; N ♠ AKQ2 ♥ K43 ♦ A72 ♣ 654, E ♠ J1093 ♥ AQ2 ♦ KQJ ♣ 987,
+; S ♠ 87 ♥ J1098 ♦ 1098 ♣ AKQJ, W ♠ 654 ♥ 765 ♦ 6543 ♣ 1032
+(defparameter *establish-hands*
+    '(((2 3 4) (0 5 12) (1 2 11) (0 10 11 12)) ((5 6 7) (9 10 11) (0 10 12) (1 7 8 9))
+      ((9 10 11 12) (6 7 8) (6 7 8 9) (5 6)) ((0 1 8) (1 2 3 4) (3 4 5) (2 3 4))))
+
+; E leading in NT: no club trick; the ♦ A falls to KQJ, W's fourth one
+; making as well; ♥ AQ2 makes the A at once, and the Q once N's K takes a
+; round (he rises when W leads through him); ♠ J1093 the fourth round
+(test (loop for suit below 4
+            collect (list (rank-count *establish-hands* 1 suit 1)
+                          (cash-count *establish-hands* 1 suit nil 1)))
+      '((0 0) (3 0) (2 1) (1 0))
+      equal)
+
+; ♠ trumps: AKQJ 654 against 987 1032 cash three, E and W ruffing the fourth
+(test (cash-count *establish-hands* 0 0 3 2) 3 eql)
+
+; N ♠ 43 ♥ AJ8763 ♦ K10 ♣ 1097, E ♠ AKJ10 ♥ K10 ♦ QJ97 ♣ K63,
+; S ♠ Q96 ♥ Q ♦ A8643 ♣ Q542, W ♠ 8752 ♥ 9542 ♦ 52 ♣ AJ8, ♥ trumps
+(defparameter *lead-hands*
+    '(((5 7 8) (8 11) (1 4 5 6 9 12) (1 2)) ((1 4 11) (5 7 9 10) (8 11) (8 9 11 12))
+      ((0 2 3 10) (1 2 4 6 12) (10) (4 7 10)) ((6 9 12) (0 3) (0 2 3 7) (0 3 5 6))))
+
+; E's ♣ K63 opposite AJ8 cash three, W finessing S's Q
+(test (cash-count *lead-hands* 1 0 2 1) 3 eql)
+
+; E leading ♦ QJ97 into N's K10 makes one trick, two when NS lead them
+(test (list (rank-count *lead-hands* 1 1 1) (theirs-count *lead-hands* 1 1) (lead-loss *lead-hands* 1 1))
+      '(1 2 1)
+      equal)
+
+; After the clubs W leads ♦ 52 through the K10 at no loss: the K and A
+; drive out, QJ make two
+(test (let ((hands '((nil (8 11) (1 4 5 6 9 12) (1 2)) (nil (5 7 9 10) (8 11) (8 9 11 12))
+                     ((3) (1 2 4 6 12) (10) (4 7 10)) (nil (0 3) (0 2 3 7) (0 3 5 6)))))
+          (list (lead-loss hands 3 1) (establish-gain hands 1 1 2 3)))
+      '(0 2)
+      equal)
+
+(defun trick-taker (trick leader trump)
+    (nth (trick-winner trick trump) (trick-seats leader)))
+
+;; Endplays
+; The side on lead throws an opponent in with a trick he must take. Then
+; he cashes his winners, if any, and has to lead a suit in which his side
+; takes fewer tricks than when his opponents run it from the top: a card of
+; his loses, or they no longer need a finesse. It fails when he can lead
+; another suit at no cost or reach his partner.
+
+; Suits in which seat's side takes fewer tricks when he has to lead them every
+; round than when his opponents lead them (see lead-loss), as (suit . loss)
+(defun lead-losses (hands seat)
+    (loop for suit from 0 below 4
+          for loss = (and (nth suit (nth seat hands)) (lead-loss hands seat suit t))
+          when (and loss (> loss 0)) collect (cons suit loss)))
+
+; Highest ranks in each suit of the side of seat, -1 when void
+(defun side-tops (hands seat)
+    (loop for suit from 0 below 4
+          collect (reduce #'max (suit-ranks hands (side-seats (mod seat 2)) suit) :initial-value -1)))
+
+; Trick in which seat leads his highest card in suit, his opponents
+; following low or discarding by keep-discard
+(defun cash-trick (hands seat trump suit keep)
+    (build-trick hands seat trump
+                 (cons (cons seat (list suit (car (last (nth suit (nth seat hands))))))
+                       (loop for s in (side-seats (- 1 (mod seat 2)))
+                             collect (cons s (if (nth suit (nth s hands))
+                                                 (list suit (first (nth suit (nth s hands))))
+                                                 (keep-discard (nth s hands) keep (side-tops hands seat) trump)))))))
+
+; Tricks the opponents of seat gain by seat being on lead in hands, or nil
+; when he can escape. In a suit where all his cards beat theirs he cashes
+; them, the opponents keeping their suits of lead-losses; a suit in which he
+; has a lower card and loses nothing by leading it is an escape, as is his
+; partner taking a trick.
+(defun endplay-gain (hands seat trump)
+    (let ((opps (side-seats (- 1 (mod seat 2)))))
+        (loop
+            (let* ((losses (lead-losses hands seat))
+                   (others (loop for s from 0 below 4
+                                 when (and (nth s (nth seat hands)) (not (assoc s losses)))
+                                 collect s))
+                   (cash (remove-if-not (lambda (s)
+                                            (let ((top (reduce #'max (suit-ranks hands opps s) :initial-value -1)))
+                                                (every (lambda (r) (> r top)) (nth s (nth seat hands)))))
+                                        others)))
+                (cond ((set-difference others cash) (return nil))
+                      (cash (let ((trick (cash-trick hands seat trump (first cash) (mapcar #'car losses))))
+                                (if (/= (trick-taker trick seat trump) seat) (return nil))
+                                (setf hands (play-trick hands seat trick))))
+                      (t (return (and losses (reduce #'max (mapcar #'cdr losses))))))))))
+
+; Trick in which leader's side throws seat in by leading its lowest card in
+; suit, nil unless seat must take it: all his cards in suit beat theirs and
+; his partner can neither beat his nor ruff
+(defun throw-in-trick (hands leader trump suit seat)
+    (let* ((partner (mod (+ leader 2) 4))
+           (mate (mod (+ seat 2) 4))
+           (ranks (nth suit (nth seat hands)))
+           (lead (first (nth suit (nth leader hands))))
+           (follow (first (nth suit (nth partner hands)))))
+        (and lead ranks
+             (> (first ranks) (max lead (or follow -1)))
+             (every (lambda (r) (< r (first ranks))) (nth suit (nth mate hands)))
+             (or (nth suit (nth mate hands)) (not trump) (null (nth trump (nth mate hands))))
+             (let ((trick (build-trick hands leader trump
+                                       (list (cons leader (list suit lead))
+                                             (cons seat (list suit (first ranks)))
+                                             (cons partner (if follow
+                                                               (list suit follow)
+                                                               (keep-discard (nth partner hands) nil
+                                                                             (side-tops hands seat) trump)))))))
+                 (and (= (trick-taker trick leader trump) seat) trick)))))
+
+; Throw-in trick of plan (:endplay suit seat), nil unless seat's opponents
+; gain from his being on lead
+(defun endplay-trick (hands leader trump suit seat)
+    (let ((trick (throw-in-trick hands leader trump suit seat)))
+        (and trick
+             (let ((gain (endplay-gain (play-trick hands leader trick) seat trump)))
+                 (and gain (> gain 0)))
+             trick)))
+
+; N ♠ 2 ♥ K43 ♦ 7, E ♠ J ♥ AQ ♦ KQ, S ♥ J1098 ♦ 10, W ♥ 765 ♦ 65, N on
+; lead: E has all the winners, so ♠ 2 throws him in: he cashes the
+; diamonds, N discarding a heart, and has to lead into the ♥ K
+(defparameter *endplay-hands*
+    '((nil (5) (1 2 11) (0)) (nil (10 11) (10 12) (9))
+      (nil (8) (6 7 8 9) nil) (nil (3 4) (3 4 5) nil)))
+
+; EW make both hearts when NS lead them, only the A when E has to
+(test (theirs-count *endplay-hands* 1 2) 2 eql)
+(test (values (solve-suit *endplay-hands* 1 2 nil 1 :stuck)) 1 eql)
+(test (lead-losses *endplay-hands* 1) '((2 . 1)) equal)
+(test (endplay-trick *endplay-hands* 0 nil 3 1)
+      '((3 0) (3 9) (2 6) (1 3))
+      equal)
+
+; ♠ trumps, all drawn, N on lead: N ♥ K43 ♦ 72, E ♥ AQ2 ♦ KQ, S ♣ A ♥ J1098,
+; W ♥ 76 ♦ 654. A diamond throws E in: he cashes the other one, S keeping
+; the ♣ A, and when he leads hearts NS make one
+(test (endplay-trick '((nil (0 5) (1 2 11) nil) (nil (10 11) (0 10 12) nil)
+                       ((12) nil (6 7 8 9) nil) (nil (2 3 4) (4 5) nil))
+                     0 3 1 1)
+      '((1 0) (1 10) (2 6) (1 2))
+      equal)
+
+; E with ♣ 9 instead of ♦ Q, S with ♣ A instead of ♥ 8: he escapes with
+; the club
+(test (endplay-trick '(((4) (5) (1 2 11) (0)) ((7) (11) (10 12) (9))
+                       ((12) (8) (7 8 9) nil) (nil (3 4) (3 4 5) nil))
+                     0 nil 3 1)
+      nil
+      eq)
+
+;; Forcing
+; Card of seat taking the trick from best as safely as he can: the lowest
+; one no opponent playing later can beat, else the lowest one; nil if none
+(defun overtaking-card (hands seat best led trump later)
+    (let ((beats (remove-if-not (lambda (c) (card-beats? c best led trump))
+                                (legal-cards (nth seat hands) led))))
+        (or (find-if (lambda (c)
+                         (notany (lambda (s)
+                                     (find-if (lambda (o) (card-beats? o c led trump))
+                                              (legal-cards (nth s hands) led)))
+                                 later))
+                     beats)
+            (first beats))))
+
+; Tricks in which leader's side leads its lowest card in suit for seat, void
+; in it, to ruff or not. Each opponent ducks or, unless his side takes the
+; trick already, takes it as cheaply as he can; the partner of leader ducks
+; unless he can take the trick back from an opponent. Nil when seat's side
+; could take a trick without his ruff: then he needn't ruff.
+(defun force-tricks (hands leader trump suit seat)
+    (let* ((side (mod leader 2))
+           (seats (trick-seats leader))
+           (lead (first (nth suit (nth leader hands))))
+           (i (position seat seats)))
+        (labels ((plays (rest trick)
+                    (if (null rest)
+                        (list trick)
+                        (let* ((s (first rest))
+                               (best (nth (trick-winner trick trump) trick))
+                               (ours (= (mod (nth (trick-winner trick trump) seats) 2) side))
+                               (duck (duck-card (nth s hands) suit trump (other-hands hands s)))
+                               (win (overtaking-card hands s best suit trump
+                                                     (remove-if (lambda (o) (= (mod o 2) (mod s 2)))
+                                                                (rest rest))))
+                               (cards (cond ((= (mod s 2) side) (list (if (and win (not ours)) win duck)))
+                                            (ours (remove-duplicates (remove nil (list duck win))
+                                                                     :test #'equal))
+                                            (t (list duck)))))
+                          (loop for c in cards
+                                append (plays (rest rest) (append trick (list c))))))))
+            (let ((tricks (and trump lead (not (eql suit trump))
+                               (null (nth suit (nth seat hands))) (nth trump (nth seat hands))
+                               (plays (rest seats) (list (list suit lead))))))
+                (and (every (lambda (tr)
+                                (or (eql (first (nth i tr)) trump)
+                                    (= (mod (trick-taker tr leader trump) 2) side)))
+                            tricks)
+                     tricks)))))
+
+; Tricks in which leader leads his lowest card in suit for his partner seat,
+; void in it, to ruff, the main one first: seat ruffs as safely as he can
+; (overtaking-card), everyone else ducks. An opponent void in suit may ruff
+; instead, before seat or overruffing him; those are the others. Nil unless
+; seat takes the main one.
+(defun ruff-tricks (hands leader trump suit seat)
+    (let* ((side (mod leader 2))
+           (seats (trick-seats leader))
+           (lead (first (nth suit (nth leader hands)))))
+        (labels ((plays (rest trick)
+                    (if (null rest)
+                        (list trick)
+                        (let* ((s (first rest))
+                               (best (nth (trick-winner trick trump) trick))
+                               (duck (duck-card (nth s hands) suit trump (other-hands hands s)))
+                               (win (overtaking-card hands s best suit trump
+                                                     (remove-if (lambda (o) (= (mod o 2) (mod s 2))) (rest rest))))
+                               (cards (cond ((= s seat) (list (if (and win (eql (first win) trump)) win duck)))
+                                            ((= (mod s 2) side) (list duck))
+                                            ((and win (null (nth suit (nth s hands))) (eql (first win) trump))
+                                               (list duck win))
+                                            (t (list duck)))))
+                          (loop for c in cards
+                                append (plays (rest rest) (append trick (list c))))))))
+            (let* ((tricks (and trump lead (not (eql suit trump))
+                                (null (nth suit (nth seat hands))) (nth trump (nth seat hands))
+                                (plays (rest seats) (list (list suit lead)))))
+                   (main (find-if (lambda (tr)
+                                      (and (= (trick-taker tr leader trump) seat)
+                                           (= (count trump tr :key #'first) 1)))
+                                  tricks)))
+                (and main (cons main (remove main tricks :test #'equal)))))))
+
+; The deal of *establish-hands*, ♠ trumps, after three rounds of clubs: S
+; leads his last one, W and E being void. Either may ruff or not; when W
+; does, N overruffs high enough for E.
+(defparameter *force-hands*
+    '((nil (0 5 12) (1 2 11) (0 10 11 12)) (nil (9 10 11) (0 10 12) (1 7 8 9))
+      ((12) (6 7 8) (6 7 8 9) (5 6)) (nil (1 2 3 4) (3 4 5) (2 3 4))))
+
+(test (force-tricks *force-hands* 2 3 0 1)
+      '(((0 12) (2 3) (1 0) (2 0)) ((0 12) (2 3) (1 0) (3 1)) ((0 12) (3 2) (3 10) (2 0)))
+      equal)
+
+; Plans played in a single suit by the suit solver: its mode and whether
+; void opponents ruff, by type (see suit-solve). Cashing and drawing go on
+; from the hand taking a trick, as no entries are checked.
+(defun plan-mode (type)
+    (case type
+        (:cash '(:run t))
+        (:draw '(:run nil))
+        ((:draw-all :establish :play :exit) '(:ours nil))))
+
+(defun plan-suit (plan trump)
+    (if (member (first plan) '(:draw :draw-all)) trump (second plan)))
+
+; Is plan of the side of leader reached, n tricks of it played?
+(defun plan-done? (hands leader trump plan n)
+    (destructuring-bind (type suit seat) plan
+        (let ((side (mod leader 2)))
+            (ecase type
+                ((:draw :draw-all) (or (null (suit-ranks hands (side-seats (- 1 side)) trump))
+                                       (null (suit-ranks hands (side-seats side) trump))
+                                       (and (eq type :draw) (= (cash-count hands side trump trump leader) 0))))
+                (:establish (<= (establish-gain hands side suit trump leader) 0))
+                (:cash (= (cash-count hands side suit trump leader) 0))
+                (:void (null (nth suit (nth seat hands))))
+                ((:ruff :cross :endplay :force :play :exit) (> n 0))))))
+
+; Does trick make progress towards plan of side (one not solved by suit)?
+(defun plan-progress? (hands leader trump plan trick)
+    (destructuring-bind (type suit seat) plan
+        (let ((taker (trick-taker trick leader trump))
+              (win (nth (trick-winner trick trump) trick)))
+            (ecase type
+                (:void (< (length (nth suit (nth seat (play-trick hands leader trick))))
+                          (length (nth suit (nth seat hands)))))
+                (:ruff (and (= taker seat) (eql (first win) trump)))
+                (:cross (= taker seat))))))
+
+; Sort key of tricks of plan, the lowest the best: side takes the trick and
+; spends low cards, trumps last
+(defun plan-key (leader trump side trick)
+    (list (if (= (mod (trick-taker trick leader trump) 2) side) 0 1)
+          (trick-cost leader trump side trick)))
+
+(defun trick-cost (leader trump side trick)
+    (loop for card in trick
+          for seat in (trick-seats leader)
+          when (= (mod seat 2) side)
+          sum (+ (second card) (if (eql (first card) trump) 13 0))))
+
+; Cards of a trick in suit of suit-solve moves, discards by keep-discard
+(defun moves-trick (hands leader trump suit moves)
+    (loop for m in moves
+          for s in (trick-seats leader)
+          collect (cond ((null m) (keep-discard (nth s hands) nil (side-tops hands (+ s 1)) trump))
+                        ((= (car m) 0) (list suit (cdr m)))
+                        (t (list trump (cdr m))))))
+
+; Trick of a solved plan: of the leader's leads giving the most tricks, the
+; one leaving the least to establish (by ranks), then one the side takes,
+; then the one whose taker keeps cards in the suit, then the cheapest for
+; the side
+(defun solved-trick (hands leader trump plan)
+    (first (solved-tricks hands leader trump plan)))
+
+; Tricks of a solved plan giving the most tricks, by that order, one for
+; each seat taking them. The leader tries each of his cards, preferring
+; either hand of the side to take the trick, or his partner playing low
+; (letting an honour of theirs take it rather than crashing ours).
+(defun solved-tricks (hands leader trump plan)
+    (let* ((side (mod leader 2))
+           (suit (plan-suit plan trump))
+           (all (apply #'append (suit-holdings hands suit)))
+           (partner (mod (+ leader 2) 4))
+           (low (first (nth suit (nth partner hands)))))
+        (destructuring-bind (mode ruffs) (plan-mode (first plan))
+            (let* ((lines (loop for r in (rank-choices (nth suit (nth leader hands)) all)
+                                append (loop for f in (append (mapcar (lambda (p) (cons :prefer p)) (side-seats side))
+                                                              (and low (list (cons partner (cons 0 low)))))
+                                             for v-moves = (multiple-value-list
+                                                               (solve-suit hands side suit trump leader mode ruffs
+                                                                           (list (cons leader (cons 0 r)) f)))
+                                             when (second v-moves)
+                                             collect (let* ((trick (moves-trick hands leader trump suit
+                                                                                (second v-moves)))
+                                                            (after (play-trick hands leader trick))
+                                                            (taker (trick-taker trick leader trump)))
+                                                         (list (list (- (first v-moves))
+                                                                     (side-gain after side suit)
+                                                                     (if (= (mod taker 2) side) 0 1)
+                                                                     (if (nth suit (nth taker after)) 0 1)
+                                                                     (trick-cost leader trump side trick))
+                                                               trick taker)))))
+                   (sorted (sort lines #'key< :key #'first))
+                   (best (first (first (first sorted)))))
+                (loop for (key trick taker) in sorted
+                      with seen = nil
+                      when (and (= (first key) best) (not (member taker seen)))
+                      collect trick
+                      and do (push taker seen))))))
+
+; Tricks of solved plan like trick, its main one, in which an opponent void
+; in the suit ruffs instead of discarding or the other way round. His ruff
+; has to take the trick from the cards played before, not from his partner.
+(defun ruff-variants (hands leader trump plan trick)
+    (let ((side (mod leader 2))
+          (suit (plan-suit plan trump))
+          (seats (trick-seats leader)))
+        (and trump (/= suit trump)
+             (loop for s in seats
+                   for i from 0
+                   when (and (/= (mod s 2) side) (null (nth suit (nth s hands))) (nth trump (nth s hands)))
+                   append (let* ((ruffed (eql (first (nth i trick)) trump))
+                                 (moves (nth-value 1 (solve-suit hands side suit trump leader
+                                                                 (first (plan-mode (first plan))) t
+                                                                 (list (cons leader (cons 0 (second (first trick))))
+                                                                       (cons s (if ruffed :discard :ruff))))))
+                                 (alt (and moves (moves-trick hands leader trump suit moves))))
+                              (and alt
+                                   (not (equal alt trick))
+                                   (or ruffed
+                                       (let ((before (trick-winner (subseq alt 0 i) trump)))
+                                           (and (/= (mod (- i before) 2) 0)
+                                                (= (trick-winner (subseq alt 0 (+ i 1)) trump) i))))
+                                   (list alt)))))))
+
+; Tricks of solved plan like trick, its main one, in which an opponent
+; following suit after a card of the side ducks instead of beating it, or
+; the other way round, so that another hand takes it, one of them of the
+; side
+(defun duck-variants (hands leader trump plan trick)
+    (let ((side (mod leader 2))
+          (suit (plan-suit plan trump))
+          (seats (trick-seats leader)))
+        (destructuring-bind (mode ruffs) (plan-mode (first plan))
+            (loop for s in (rest seats)
+                  for i from 1
+                  for ranks = (nth suit (nth s hands))
+                  for before = (nth (trick-winner (subseq trick 0 i) trump) trick)
+                  for beat = (and (/= (mod s 2) side) ranks (eql (first before) suit)
+                                  (= (mod (nth (trick-winner (subseq trick 0 i) trump) seats) 2) side)
+                                  (find-if (lambda (r) (> r (second before))) ranks))
+                  for alt = (and beat
+                                 (let* ((card (if (> (second (nth i trick)) (second before)) (first ranks) beat))
+                                        (moves (nth-value 1 (solve-suit hands side suit trump leader mode ruffs
+                                                                        (list (cons leader (cons 0 (second (first trick))))
+                                                                              (cons s (cons 0 card)))))))
+                                     (and moves (moves-trick hands leader trump suit moves))))
+                  when (and alt
+                            (let ((takers (list (trick-taker alt leader trump) (trick-taker trick leader trump))))
+                                (and (/= (first takers) (second takers))
+                                     (find side takers :key (lambda (s) (mod s 2))))))
+                  collect alt))))
+
+; Is it worth making seat, an opponent of leader, ruff? When his trumps are
+; at least as many as the longest ones of leader's side, so they need
+; drawing, or when our hand after him is void in suit and shorter in trumps
+; than its partner, so it overruffs, and seat has more trumps than his
+; partner.
+(defun ruff-worth? (hands leader trump suit seat)
+    (flet ((len (s) (length (nth trump (nth s hands)))))
+        (let ((next (mod (+ seat 1) 4)))
+            (or (>= (len seat) (reduce #'max (mapcar #'len (side-seats (mod leader 2)))))
+                (and (/= next leader)
+                     (null (nth suit (nth next hands)))
+                     (< (len next) (len (mod (+ next 2) 4)))
+                     (> (len seat) (len (mod (+ seat 2) 4))))))))
+
+; Is some ruff of an opponent in tricks, led from leader, worth it?
+(defun ruffs-worth? (hands leader trump tricks)
+    (let ((ruffers (loop for tr in tricks
+                         append (loop for card in tr
+                                      for s in (trick-seats leader)
+                                      when (and (/= (mod s 2) (mod leader 2)) (eql (first card) trump)
+                                                (not (eql (first (first tr)) trump)))
+                                      collect s))))
+        (or (null ruffers)
+            (some (lambda (s) (ruff-worth? hands leader trump (first (first (first tricks))) s))
+                  ruffers))))
+
+(defun key< (a b)
+    (loop for x in a
+          for y in b
+          when (/= x y) return (< x y)))
+
+; Tricks plan can go on with in the position, the best first and the others
+; ways the defence can play it; nil when none makes progress. Plans in one
+; suit follow the suit solver, ruffs, voids and crosses taking-tricks (sure
+; ones only, no opponent able to beat the winning card).
+(defun plan-options (hands leader trump plan)
+    (destructuring-bind (type suit seat) plan
+        (cond ((eq type :endplay)
+                 (let ((trick (endplay-trick hands leader trump suit seat)))
+                     (and trick (list trick))))
+              ((eq type :force) (force-tricks hands leader trump suit seat))
+              ((and (eq type :ruff) (= seat (mod (+ leader 2) 4)))
+                 (ruff-tricks hands leader trump suit seat))
+              ((plan-mode type)
+                 (and (nth (plan-suit plan trump) (nth leader hands))
+                      (let ((trick (solved-trick hands leader trump plan)))
+                          (cons trick (ruff-variants hands leader trump plan trick)))))
+              (t (let* ((side (mod leader 2))
+                        (suit (if (eq type :cross) nil suit))
+                        (ws-wins (loop for (w . wins) in (seat-groups hands)
+                                       collect (cons w (remove-if-not (lambda (c) (or (not suit) (eql (first c) suit)
+                                                                                      (eql (first c) trump)))
+                                                                      wins))))
+                        (tricks (taking-tricks hands leader trump ws-wins :suit suit :free-side side
+                                               :certain-only t
+                                               :test (lambda (tr) (plan-progress? hands leader trump plan tr))))
+                        (trick (first (sort (copy-list tricks) #'key<
+                                            :key (lambda (tr) (plan-key leader trump side tr))))))
+                     (and trick (list trick)))))))
+
+; Tricks of plan played from the position, in order. When the defence can
+; play the first one in several ways, the second value gives them all (the
+; first value having just the main one); later such tricks end the plan.
+;
+; A solved plan (type suit end) is played along the line ending with the
+; lead in seat end, of plan-lines; with end nil along the longest one.
+(defun plan-tricks (hands leader trump plan)
+    (if (plan-mode (first plan))
+        (let ((options (and (not (plan-done? hands leader trump plan 0))
+                            (plan-options hands leader trump plan))))
+            (cond ((rest options) (values (list (first options)) options))
+                  (options (let ((lines (plan-lines hands leader trump plan)))
+                               (if (third plan)
+                                   (cdr (assoc (third plan) lines))
+                                   (cdr (first (sort (copy-list lines) #'>
+                                                     :key (lambda (l) (length (cdr l)))))))))))
+        (step-plan-tricks hands leader trump plan)))
+
+; Lines of a solved plan from the position, as an alist (end . tricks): one
+; ending with the lead in each seat end of the side (nil when the opponents
+; take the last trick), the first found by the order of solved-tricks. A trick an opponent could ruff ends a line before it.
+(defun plan-lines (hands leader trump plan)
+    (let ((side (mod leader 2))
+          (plan (list (first plan) (second plan) nil))
+          (memo (make-hash-table :test 'equal)))
+        (labels ((walk (hands leader n last)
+                    (let ((key (list hands leader (min n 1) last)))
+                        (or (gethash key memo)
+                            (setf (gethash key memo) (lines hands leader n last)))))
+                 (lines (hands leader n last)
+                    (let ((ans nil))
+                        (unless (or (plan-done? hands leader trump plan n)
+                                    (null (nth (plan-suit plan trump) (nth leader hands))))
+                            (dolist (trick (solved-tricks hands leader trump plan))
+                                (unless (ruff-variants hands leader trump plan trick)
+                                    (let ((taker (trick-taker trick leader trump)))
+                                        (dolist (line (if (= (mod taker 2) side)
+                                                          (walk (play-trick hands leader trick) taker (+ n 1) taker)
+                                                          (list (list nil))))
+                                            (unless (assoc (car line) ans)
+                                                (push (cons (car line) (cons trick (cdr line))) ans)))))))
+                        (or (reverse ans) (list (list last))))))
+            (remove-if (lambda (l) (null (cdr l))) (walk hands leader 0 nil)))))
+
+; Tricks of plan played trick by trick from the position (see plan-tricks)
+(defun step-plan-tricks (hands leader trump plan)
+    (let ((side (mod leader 2))
+          (tricks nil))
+        (loop
+            (if (plan-done? hands leader trump plan (length tricks)) (return))
+            (let ((options (plan-options hands leader trump plan)))
+                (if (or (null options) (and tricks (rest options))) (return))
+                (push (first options) tricks)
+                (if (rest options) (return-from step-plan-tricks (values tricks options)))
+                (setf hands (play-trick hands leader (first options))
+                      leader (trick-taker (first options) leader trump))
+                (if (/= (mod leader 2) side) (return))))
+        (reverse tricks)))
+
+; Plans worth trying for the side on lead. Leading a suit mustn't lose a
+; trick by ranks against the opponents leading it (lead-loss), when
+; establishing it; only a side as long in trumps as the opponents draws
+; them, whatever it loses (they wouldn't lead trumps for it). A suit to
+; establish isn't voided, nor led for an opponent to ruff: establishing
+; does that already.
+(defun plan-candidates (hands leader trump)
+    (let* ((side (mod leader 2))
+           (ours (side-seats side))
+           (opps (side-seats (- 1 side))))
+        (flet ((len (seat suit) (length (nth suit (nth seat hands))))
+               (holds (suit) (nth suit (nth leader hands))))
+            (let ((establish (loop for suit from 0 below 4
+                                   when (and (not (eql suit trump)) (holds suit)
+                                             (> (establish-gain hands side suit trump leader) 0)
+                                             (<= (lead-loss hands leader suit) 0))
+                                   collect suit)))
+                (append
+                    (if (and trump (holds trump) (suit-ranks hands opps trump)
+                             (>= (reduce #'max (mapcar (lambda (s) (len s trump)) ours))
+                                 (reduce #'max (mapcar (lambda (s) (len s trump)) opps))))
+                        (list (list :draw trump nil)))
+                    (loop for suit from 0 below 4
+                          append (append
+                                    (if (and (holds suit) (> (cash-count hands side suit trump leader) 0)
+                                             (or (not (eql suit trump)) (null (suit-ranks hands opps trump))))
+                                        (list (list :cash suit nil)))
+                                    (if (member suit establish)
+                                        (list (list :establish suit nil)))
+                                    (if (and trump (not (eql suit trump)))
+                                        (loop for seat in ours
+                                              for partner = (mod (+ seat 2) 4)
+                                              when (and (> (len seat trump) 0) (> (len partner suit) 0))
+                                              collect (cond ((= (len seat suit) 0) (list :ruff suit seat))
+                                                            ((and (< (len seat suit) (min 3 (len partner suit)))
+                                                                  (<= (side-gain hands side suit) 0))
+                                                               (list :void suit seat)))))))
+                    (loop for seat in opps
+                          append (loop for suit from 0 below 4
+                                       when (throw-in-trick hands leader trump suit seat)
+                                       collect (list :endplay suit seat)))
+                    (loop for seat in opps
+                          append (loop for suit from 0 below 4
+                                       when (and (not (member suit establish))
+                                                 (force-tricks hands leader trump suit seat))
+                                       collect (list :force suit seat)))
+                    (list (list :cross nil (mod (+ leader 2) 4))))))))
+
+; E on lead: ♥ AQ2 cashes the A and establishes the Q, ♣ 987 1032 make no
+; trick at all. A club would throw S in, to no gain.
+(test (plan-candidates *establish-hands* 1 nil)
+      '((:establish 1 nil) (:cash 2 nil) (:establish 2 nil) (:establish 3 nil) (:endplay 0 2) (:cross nil 3))
+      equal)
+(test (endplay-trick *establish-hands* 1 nil 0 2) nil eq)
+
+; ♠ trumps, S on lead: the fourth club isn't sure, as W and E can ruff it
+(test (length (plan-tricks *establish-hands* 2 3 '(:cash 0 nil))) 3 eql)
+
+; ♥ trumps, E on lead: ♣ K63 opposite AJ8 cash three, starting with the
+; finesse of the J against S's Q
+(test (plan-tricks *lead-hands* 1 2 '(:cash 0 nil))
+      '(((0 1) (0 0) (0 9) (0 5)) ((0 12) (0 7) (0 4) (0 2)) ((0 6) (0 8) (0 11) (0 3)))
+      equal)
+
+; It can end in either hand: in W the ♣ 8 goes to the K and the 6 to the A
+(test (mapcar (lambda (l) (cons (car l) (length (cdr l))))
+              (plan-lines *lead-hands* 1 2 '(:cash 0 nil)))
+      '((1 . 3) (3 . 3))
+      equal)
+(test (plan-tricks *lead-hands* 1 2 '(:cash 0 3))
+      '(((0 1) (0 0) (0 9) (0 5)) ((0 6) (0 7) (0 11) (0 2)) ((0 4) (0 3) (0 12) (0 8)))
+      equal)
+
+; Neither leading ♦ QJ97 into N's K10 nor drawing trumps with 6 against 7
+(test (intersection '((:establish 1 nil) (:draw 2 nil) (:draw-all 2 nil))
+                    (plan-candidates *lead-hands* 1 2)
+                    :test #'equal)
+      nil
+      eq)
+
+; E ♥ Q2 against N ♥ K4 S ♥ J10: leading the Q establishes nothing unless N
+; ducks
+(test (plan-tricks '((nil nil (2 11) nil) (nil nil (0 10) nil) (nil nil (8 9) nil) (nil (4) (5) nil))
+                   1 3 '(:establish 2 nil))
+      nil
+      eq)
+
+; ♠ AKQ2 87 against J1093 654: drawing keeps the lead, so it leaves E's J;
+; drawing all of them gives a trick to it
+(test (mapcar #'length (list (plan-tricks *establish-hands* 2 3 '(:draw 3 nil))
+                             (plan-tricks *establish-hands* 2 3 '(:draw-all 3 nil))))
+      '(3 4)
+      equal)
+
+; Hearts trumps, S leading: N ♦4, E ♦107, S ♦KQ92, W ♦AJ8653. S's Q drives
+; out the A, so that the K is a master, rather than the 2 losing to the 7.
+(test (plan-tricks '(((0 2 3 6) (2) (4 5 7 10) (5 8 11 12)) ((1 4 10) (5 8) (0 1 2 3 11 12) (3 6))
+                     ((5 7 8 9 12) (0 7 10 11) nil (1 4 7 9)) ((11) (1 3 4 6 9 12) (6 8 9) (0 2 10)))
+                   2 2 '(:establish 1 nil))
+      '(((1 10) (1 12) (1 2) (1 5)))
+      equal)
+
+; Plan, or when solved and its lines may end in either hand of the side, a
+; plan for each, (type suit end)
+(defun end-variants (hands leader trump plan)
+    (let ((ends (and (plan-mode (first plan))
+                     (not (plan-done? hands leader trump plan 0))
+                     (null (rest (plan-options hands leader trump plan)))
+                     (remove nil (mapcar #'car (plan-lines hands leader trump plan))))))
+        (if (rest ends)
+            (mapcar (lambda (end) (list (first plan) (second plan) end)) ends)
+            (list plan))))
+
+; Does the ruff in trick gain a trump trick? When the side's trump tricks
+; by ranks after it, and the trick if it takes it, are more than before. A
+; long hand's trumps that make tricks anyway gain nothing; a ruff by trumps
+; that make none (E's Q8 under AK) does.
+(defun ruff-gain? (hands leader trump trick)
+    (let ((side (mod leader 2))
+          (ruffer (loop for card in trick
+                        for s in (trick-seats leader)
+                        when (and (= (mod s 2) (mod leader 2)) (eql (first card) trump)
+                                  (not (eql (first (first trick)) trump)))
+                        return s)))
+        (and ruffer
+             (> (+ (theirs-count (play-trick hands leader trick) side trump)
+                   (if (= (mod (trick-taker trick leader trump) 2) side) 1 0))
+                (theirs-count hands side trump)))))
+
+; Exits of the leader: plans (:exit suit nil) with their trick, taken by
+; the opponents, in the suits losing the least by leading them (lead-loss);
+; none where an opponent could ruff and his partner discard.
+(defun exit-hints (hands leader trump)
+    (let* ((side (mod leader 2))
+           (exits (loop for suit from 0 below 4
+                        for plan = (list :exit suit nil)
+                        for tricks = (and (nth suit (nth leader hands))
+                                          (or (eql suit trump)
+                                              (notany (lambda (s) (and (null (nth suit (nth s hands)))
+                                                                       trump (nth trump (nth s hands))))
+                                                      (side-seats (- 1 side))))
+                                          (plan-tricks hands leader trump plan))
+                        when (and tricks (/= (mod (trick-taker (first tricks) leader trump) 2) side))
+                        collect (list (lead-loss hands leader suit) plan tricks)))
+           (least (reduce #'min (mapcar #'first exits) :initial-value most-positive-fixnum)))
+        (loop for (loss plan tricks) in exits
+              when (= loss least) collect (list plan tricks))))
+
+; What a line of tricks from leader is to its side: the cards it plays and
+; who takes each trick. Lines differing only in cards of the opponents not
+; taking a trick are alike.
+(defun line-key (tricks leader trump)
+    (let ((side (mod leader 2)))
+        (loop for tr in tricks
+              for taker = (trick-taker tr leader trump)
+              collect (cons taker (loop for card in tr
+                                        for s in (trick-seats leader)
+                                        when (= (mod s 2) side) collect card))
+              do (setf leader taker))))
+
+; Ways to play plan, as a list of (plan tricks): its lines ending in either
+; hand of the side (end-variants), or the ways the defence can play its
+; first trick, each just that trick: ruffing or not, or but for cashing,
+; ducking or not (duck-variants), the line then ending after its first
+; trick too. Drawing trumps keeping the lead has
+; drawing all of them as variants. Lines alike are given once.
+(defun plan-variants (hands leader trump plan)
+    (let ((ans nil))
+        (flet ((add (v line)
+                   (unless (find (line-key line leader trump) ans
+                                 :key (lambda (a) (line-key (second a) leader trump)) :test #'equal)
+                       (push (list v line) ans))))
+            (dolist (p (if (eq (first plan) :draw) (list plan (list :draw-all (second plan) nil)) (list plan)))
+                (dolist (v (end-variants hands leader trump p))
+                    (multiple-value-bind (tricks options) (plan-tricks hands leader trump v)
+                        (dolist (line (if options (mapcar #'list options) (and tricks (list tricks))))
+                            (let ((alts (and (plan-mode (first v)) (not (eq (first v) :cash))
+                                             (duck-variants hands leader trump v (first line))))
+                                  (open (list (first v) (second v) nil)))
+                                (cond (alts (add open (list (first line)))
+                                            (dolist (alt alts) (add open (list alt))))
+                                      (t (add v line)))))))))
+        (reverse ans)))
+
+; E's clubs, cashed ending in E or in W
+(test (mapcar #'first (plan-variants *lead-hands* 1 2 '(:cash 0 nil)))
+      '((:cash 0 1) (:cash 0 3))
+      equal)
+
+; Plans for the side on lead with their variants, as a list of (plan
+; variants) (see plan-variants). Variants with the same tricks as an earlier
+; plan are left out, and plans left without any, as are ones but cashing
+; that let an opponent ruff when it isn't worth it (ruffs-worth?), and ruffs
+; gaining no trump trick. Without a plan to establish a suit the leader may
+; exit (exit-hints). When none is left, he just plays a suit, (:play suit
+; nil), whoever takes the trick.
+(defun plan-hints (hands leader trump)
+    (let ((ans nil))
+        (flet ((add (plan variants)
+                   (let ((new (remove-if (lambda (v)
+                                             (some (lambda (h)
+                                                       (find (line-key (second v) leader trump) (second h)
+                                                             :key (lambda (o) (line-key (second o) leader trump))
+                                                             :test #'equal))
+                                                   ans))
+                                         variants)))
+                       (if new (push (list plan new) ans)))))
+            (loop for plan in (remove nil (plan-candidates hands leader trump))
+                  for variants = (plan-variants hands leader trump plan)
+                  when (and variants
+                            (or (eq (first plan) :cash)
+                                (ruffs-worth? hands leader trump (mapcar (lambda (v) (first (second v))) variants)))
+                            (or (not (eq (first plan) :ruff))
+                                (ruff-gain? hands leader trump (first (second (first variants))))))
+                  do (add plan variants))
+            (unless (find :establish ans :key #'caar)
+                (loop for (plan tricks) in (exit-hints hands leader trump)
+                      do (add plan (list (list plan tricks)))))
+            (or (reverse ans)
+                (loop for suit from 0 below 4
+                      for plan = (list :play suit nil)
+                      for variants = (and (nth suit (nth leader hands)) (plan-variants hands leader trump plan))
+                      when variants collect (list plan variants))))))
+
+; After three clubs the last one isn't a sure cash: S can establish it, E
+; and W choosing whether to ruff (E's four trumps need drawing), N
+; overruffing W. N ruffing it high would gain no trump trick. In hearts E
+; may also duck S's 8.
+(test (mapcar (lambda (h) (cons (first h) (mapcar #'first (second h)))) (plan-hints *force-hands* 2 3))
+      '(((:draw 3 nil) (:draw 3 nil) (:draw-all 3 nil)) ((:establish 0 nil) (:establish 0 nil)
+        (:establish 0 nil) (:establish 0 nil)) ((:cash 1 nil) (:cash 1 nil))
+        ((:establish 2 nil) (:establish 2 nil) (:establish 2 nil)))
+      equal)
+(test (nth-value 1 (plan-tricks *force-hands* 2 3 '(:establish 0 nil)))
+      '(((0 12) (1 1) (1 0) (2 0)) ((0 12) (3 2) (3 10) (2 0)) ((0 12) (1 1) (1 0) (3 1)))
+      equal)
+
+; ♠ trumps, N on lead with ♥ QJ, E ♥ K54, S ♥ A6, W void with ♠ KQJ10, to
+; be drawn: establishing hearts, W may ruff or not
+(test (nth-value 1 (plan-tricks '(((0) nil (9 10) (0 1)) ((1 2) nil (2 3 11) nil)
+                                  ((3) nil (4 12) (2 3)) ((4) nil nil (8 9 10 11)))
+                                0 3 '(:establish 2 nil)))
+      '(((2 9) (2 2) (2 4) (0 4)) ((2 9) (2 2) (2 4) (3 8)))
+      equal)
+
+; ♠ trumps, N on lead with ♥ QJ3, E and S void, W ♥ 54: when E ruffs the
+; cash, S overruffs, but then has no heart to go on with, so E rather ruffs
+(test (nth-value 1 (plan-tricks '((nil nil (1 9 10) (11 12)) ((11 12) nil nil (3 4 5))
+                                  ((0 1 2) nil nil (7 8)) ((3 4) nil (2 3) (2)))
+                                0 3 '(:cash 2 nil)))
+      '(((2 9) (3 3) (3 7) (2 2)) ((2 9) (0 11) (0 0) (2 2)))
+      equal)
+
+; *lead-hands* after three clubs and a diamond, S on lead: N ♠ 43 ♥ AJ8763
+; ♦ K, E ♠ AKJ10 ♥ K10 ♦ Q97, S ♠ Q96 ♥ Q ♦ 8643 ♣ Q, W ♠ 8752 ♥ 9542 ♦ 5.
+; Drawing trumps, its variant drawing all of them lets E's K take the Q
+; rather than crashing the A (or ducks, the Q taking); the club ruff, sure
+; only with the A, gains nothing; a spade exits.
+(test (mapcar (lambda (h) (cons (first h) (mapcar #'first (second h))))
+              (plan-hints '((nil (11) (1 4 5 6 9 12) (1 2)) (nil (5 7 10) (8 11) (8 9 11 12))
+                            ((10) (1 2 4 6) (10) (4 7 10)) (nil (3) (0 2 3 7) (0 3 5 6)))
+                          2 2))
+      '(((:draw 2 nil) (:draw 2 nil) (:draw-all 2 nil) (:draw-all 2 nil)) ((:cash 1 nil) (:cash 1 nil))
+        ((:exit 3 nil) (:exit 3 nil)))
+      equal)
+(test (plan-tricks '((nil (11) (1 4 5 6 9 12) (1 2)) (nil (5 7 10) (8 11) (8 9 11 12))
+                     ((10) (1 2 4 6) (10) (4 7 10)) (nil (3) (0 2 3 7) (0 3 5 6)))
+                   2 2 '(:draw-all 2 nil))
+      '(((2 10) (2 0) (2 1) (2 11)))
+      equal)
+
+; *lead-hands*, ♠ trumps, N leading ♦ K10 opposite A8643 against QJ97 and
+; 52: cashing leads the 10 to the A, or the K first, not letting the 10 run
+; when E ducks. That is establishing, E covering or refusing to.
+(test (mapcar #'second (plan-variants *lead-hands* 0 3 '(:cash 1 nil)))
+      '((((1 11) (1 5) (1 1) (1 0)) ((1 8) (1 7) (1 12) (1 3)))
+        (((1 8) (1 5) (1 12) (1 0)) ((1 1) (1 3) (1 11) (1 7))))
+      equal)
+(test (second (find '(:establish 1 nil) (plan-hints *lead-hands* 0 3) :key #'first :test #'equal))
+      '(((:establish 1 nil) (((1 8) (1 9) (1 12) (1 0)))) ((:establish 1 nil) (((1 8) (1 5) (1 1) (1 0)))))
+      equal)
+
+; *lead-hands*, ♠ trumps, after N cashed ♦ K and 10 to the A: S leads a
+; diamond for N to ruff with the 3, W ruffing first with the 5 or not; S
+; establishes diamonds or clubs, cashes ♥ Q (no hint failed on the ruff)
+(test (mapcar (lambda (h) (cons (first h) (mapcar #'second (second h))))
+              (plan-hints '(((5 7 8) nil (1 4 5 6 9 12) (1 2)) ((1 4 11) (9 10) (8 11) (8 9 11 12))
+                            ((0 2 3 10) (2 4 6) (10) (4 7 10)) ((6 9 12) nil (0 2 3 7) (0 3 5 6)))
+                          2 3))
+      '(((:establish 0 nil) (((0 0) (0 6) (0 5) (0 1))))
+        ((:establish 1 nil) (((1 2) (2 0) (2 1) (1 9))) (((1 2) (3 3) (2 1) (1 9))))
+        ((:ruff 1 0) (((1 2) (2 0) (3 1) (1 9))) (((1 2) (3 3) (0 5) (1 9))))
+        ((:cash 2 nil) (((2 10) (2 0) (2 12) (2 8)))))
+      equal)
+
+; E ♥ Q2 against N ♥ K4 S ♥ J10, no plan: he can only exit with a heart
+(test (plan-hints '((nil nil (2 11) nil) (nil nil (0 10) nil) (nil nil (8 9) nil) (nil (4) (5) nil))
+                  1 3)
+      '(((:exit 2 nil) (((:exit 2 nil) (((2 0) (2 8) (2 5) (2 2)))))))
+      equal)
+
+; ♥ trumps, W on lead: N ♠ 6 ♥ A94 ♦ 9 ♣ Q643, E ♠ Q ♥ Q8 ♣ K108752, S ♥
+; KJ107652 ♦ Q ♣ A, W ♠ AKJ ♥ 3 ♦ J107 ♣ J9. E ruffs a diamond with the 8,
+; S's Q falling: a trump trick E's Q8 under the AK wouldn't make, though
+; longer than W's 3. Crossing to E is that ruff, so it's left out.
+(defparameter *uppercut-hands*
+    '(((1 2 4 10) (7) (2 7 12) (4)) ((0 3 5 6 8 11) nil (6 10) (10))
+      ((12) (10) (0 3 4 5 8 9 11) nil) ((7 9) (5 8 9) (1) (9 11 12))))
+
+(test (mapcar (lambda (h) (cons (first h) (mapcar #'first (second h)))) (plan-hints *uppercut-hands* 3 2))
+      '(((:establish 1 nil) (:establish 1 nil)) ((:ruff 1 1) (:ruff 1 1))
+        ((:establish 3 nil) (:establish 3 nil) (:establish 3 nil)) ((:void 3 1) (:void 3 1)))
+      equal)
+(test (second (find '(:ruff 1 1) (plan-hints *uppercut-hands* 3 2) :key #'first :test #'equal))
+      '(((:ruff 1 1) (((1 5) (1 7) (2 6) (1 10)))))
+      equal)
+
+;; Plan regression checks
+; Problems met playing hands out by hints alone, leader leading first: a
+; position with no hint, an error, or a variant whose tricks can't be
+; played. At each position the next hint and variant in turn are played.
+(defun hints-playthrough (hands leader trump)
+    (let ((problems nil)
+          (turn 0))
+        (loop while (some #'identity (apply #'append hands))
+              do (let ((hints (handler-case (plan-hints hands leader trump)
+                                  (error (e) (push (list :error hands leader (princ-to-string e)) problems)
+                                             (return)))))
+                     (if (null hints)
+                         (progn (push (list :no-hint hands leader) problems) (return)))
+                     (loop for (plan variants) in hints
+                           do (loop for (v tricks) in variants
+                                    unless (loop with h = hands
+                                                 with l = leader
+                                                 for tr in tricks
+                                                 always (legal-trick? h l tr)
+                                                 do (setf h (play-trick h l tr)
+                                                          l (trick-taker tr l trump)))
+                                    do (push (list :illegal hands leader v tricks) problems)))
+                     (let* ((hint (nth (mod turn (length hints)) hints))
+                            (tricks (second (nth (mod turn (length (second hint))) (second hint)))))
+                         (incf turn)
+                         (dolist (tr tricks)
+                             (if (not (legal-trick? hands leader tr)) (return))
+                             (setf hands (play-trick hands leader tr)
+                                   leader (trick-taker tr leader trump))))))
+        (reverse problems)))
+
+; The user's deal in each denomination, and random ones, played out by hints
+(test (loop for trump in '(nil 0 1 2 3)
+            append (hints-playthrough *lead-hands* 0 trump))
+      nil
+      equal)
+(test (let ((*random-state* (sb-ext:seed-random-state 7)))
+          (loop repeat 4
+                for hands = (mapcar #'suits (random-deal))
+                for trump = (nth (random 5) '(nil 0 1 2 3))
+                append (hints-playthrough hands (random 4) trump)))
+      nil
       equal)
