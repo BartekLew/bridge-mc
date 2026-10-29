@@ -191,7 +191,7 @@
 
 (defun valid-sim-id? (id)
     (and (> (length id) 0)
-         (every #'alphanumericp id)))
+         (every (lambda (c) (or (alphanumericp c) (char= c #\-))) id)))
 
 (defun new-sim-id ()
     (format nil "~(~36R~36R~)" (get-universal-time) (random (expt 36 3))))
@@ -301,7 +301,7 @@
               (getf axis :|DECLARER|)
               (getf axis :|SCORE|))))
 
-(defparameter *plan-types* '(:draw :draw-all :establish :cash :ruff :void :cross :endplay :force :play :exit))
+(defparameter *plan-types* '(:draw :draw-all :establish :duck :cash :ruff :void :cross :endplay :force :play :exit))
 
 (defun plan-json (plan)
     (destructuring-bind (type suit seat) plan
@@ -325,6 +325,7 @@
                 (:draw (format nil "Draw trumps~@[, ending in ~A~]" seat))
                 (:draw-all (format nil "Draw all trumps~@[, ending in ~A~]" seat))
                 (:establish (format nil "Establish ~A~@[, ending in ~A~]" suit seat))
+                (:duck (format nil "Duck ~A~@[, ending in ~A~]" suit seat))
                 (:cash (format nil "Cash ~A~@[, ending in ~A~]" suit seat))
                 (:ruff (format nil "Ruff ~A in ~A" suit seat))
                 (:void (format nil "Void ~A in ~A" suit seat))
@@ -532,6 +533,242 @@
                  (loop for (v tricks) in variants
                        do (format t "  ~S~%" v)
                           (print-tricks tricks leader trump 1 "    ")))))
+
+; Plays each axis of sim id by hints (hint-deal). With save, writes the
+; deal played so as a new sim and returns its id.
+(defun hint-sim (id &key save (timeout 600))
+    (let ((sim (jonathan:parse (or (load-sim id) (error "No simulation ~A" id)))))
+        (hint-deal (getf sim :|HANDS|)
+                   (loop for axis in (getf (getf sim :|RESULT|) :|POWER|)
+                         collect (list (str2suitno (getf axis :|TRUMP|)) (declarer-seat axis)))
+                   :save (and save (new-sim-id)) :timeout timeout)))
+
+; Hand objects N E S W of formulas of a saved sim, W the rest when missing
+(defun formula-hands (formulas)
+    (let ((hs (mapcar #'str2hand formulas)))
+        (if (= (length hs) 4) hs (append hs (list (make-instance 'hand :remaining hs))))))
+
+; Plays the deal of formulas by hints (hint-play) in each axis (trump
+; declarer), suit and seat numbers, printing its tricks against those of
+; play-deal and the hint line. With save, an id, writes the deal played so
+; as sim save, each sequence a plan. The search logs to log; the axes share
+; timeout seconds equally, an axis timing out giving the best line found so
+; far. Returns per axis (trump declarer play-deal-tricks tricks done
+; seconds nodes).
+(defun hint-deal (formulas axes &key save (timeout 600) (log "hint-play.log"))
+    (with-open-file (*hint-log* (merge-pathnames log (uiop:getcwd)) :direction :output
+                                :if-exists :supersede :if-does-not-exist :create :external-format :utf-8)
+        (let ((*hint-log-time* (get-internal-real-time)))
+            (hint-deal-1 formulas axes save timeout))))
+
+(defun hint-deal-1 (formulas power save timeout)
+    (let* ((objs (formula-hands formulas))
+           (hands (mapcar #'suits objs)))
+        (dotimes (seat 4) (format t "~A~%" (hand-str hands seat)))
+        (let ((axes (loop for (trump declarer) in power
+                          for i from 0
+                          for leader = (mod (+ declarer 1) 4)
+                          collect (let* ((t0 (get-internal-real-time))
+                                         (old (second (score (apply #'play-deal (and trump (nth trump '(c d h s)))
+                                                                    (roll declarer objs)))))
+                                         (t1 (get-internal-real-time))
+                                         (*hint-deadline* (+ t1 (floor (* timeout internal-time-units-per-second)
+                                                                       (length power))))
+                                         (*hint-nodes* 0)
+                                         (*hint-hits* 0)
+                                         (*hint-cuts* 0)
+                                         (*hint-time* 0)
+                                         (*hint-best* nil)
+                                         (*hint-profile* (make-hash-table :test 'equal))
+                                         (*solve-hits* 0)
+                                         (*solve-misses* 0)
+                                         (done t))
+                                      (hint-log "axis ~D: ~A by ~A, play-deal took ~D" i (suitstr trump)
+                                                (nth declarer *seats*) old)
+                                      (multiple-value-bind (ns lines)
+                                              (handler-case (hint-play hands leader trump)
+                                                  (hint-timeout ()
+                                                      (setf done nil)
+                                                      (values (car *hint-best*) (cdr *hint-best*))))
+                                          (hint-log "axis ~D ~:[timed out~;done~]: ~D nodes, ~D hits, ~D cuts, ~,1Fs in hints"
+                                                    i done *hint-nodes* *hint-hits* *hint-cuts* *hint-time*)
+                                          (dolist (line (profile-lines)) (hint-log "  ~A" line))
+                                          (let ((tricks (and ns (if (evenp declarer) ns (- 13 ns))))
+                                                (t2 (get-internal-real-time)))
+                                              (format t "~%Axis ~D: ~A by ~A: play-deal ~D (~,1Fs), hints ~:[best so far ~;~]~A (~,1Fs, ~D nodes, ~D hits, ~D cuts)~%"
+                                                      i (suitstr trump) (nth declarer *seats*) old
+                                                      (/ (- t1 t0) internal-time-units-per-second) done (or tricks "none")
+                                                      (/ (- t2 t1) internal-time-units-per-second)
+                                                      *hint-nodes* *hint-hits* *hint-cuts*)
+                                              (let ((l leader) (n 1))
+                                                  (loop for (plan tricks) in lines
+                                                        do (format t "  -- ~A~%" (plan-label plan))
+                                                           (setf l (print-tricks tricks l trump n))
+                                                           (incf n (length tricks))))
+                                              `(:trump ,(suitstr trump)
+                                                :declarer ,(nth declarer *seats*)
+                                                :score ,(or tricks 0)
+                                                :lines ,lines
+                                                :summary (,trump ,declarer ,old ,tricks ,done
+                                                          ,(round (- t2 t1) internal-time-units-per-second)
+                                                          ,*hint-nodes*))))))))
+            (when save
+                (write-sim save
+                           `(:hands ,formulas
+                             :result (:score ,(apply #'deal-score (mapcar #'axis-contract axes))
+                                      :power ,(loop for axis in axes
+                                                    for trump = (str2suitno (getf axis :trump))
+                                                    collect `(:trump ,(getf axis :trump)
+                                                              :declarer ,(getf axis :declarer)
+                                                              :score ,(getf axis :score)
+                                                              :sequences ,(loop for (plan tricks) in (getf axis :lines)
+                                                                                append (push-plan nil plan tricks trump t))))))))
+            (mapcar (lambda (axis) (getf axis :summary)) axes))))
+
+;; Test deals for play by hints, saved as sims/hinttest-NN.json
+; A scenario is (name count defs check contract): defs of the hands N E S
+; as the generator of mc-deal takes them (W gets the rest), check a test of
+; the deal (hands as suits, k its number in the scenario) for what defs
+; can't say, contract (trump declarer) of N-S, else the one sim-axis picks.
+
+(defun hand-hcp (hand)
+    (loop for ranks in hand sum (loop for r in ranks when (> r 8) sum (- r 8))))
+
+(defun side-hcp (hands side)
+    (+ (hand-hcp (nth side hands)) (hand-hcp (nth (+ side 2) hands))))
+
+(defun suit-len (hands seat suit)
+    (length (nth suit (nth seat hands))))
+
+(defun hinttest-scenarios ()
+    (list
+        ; 20 HCP 4-4-4-1 with stoppers, ♥ K singleton opposite ♥ AQxxxxx and
+        ; spot cards; the opponents' hearts 3-2, 4-1, 5-0
+        (list "strong-nt" 3
+              '((:hcp (20 20) :s (4 4 (2 nil)) :h (1 1 (3 3)) :d (4 4 (2 nil)) :c (4 4 (2 nil)))
+                nil
+                (:hcp (6 6) :h (7 7 (6 6))))
+              (lambda (h k) (= (max (suit-len h 1 2) (suit-len h 3 2)) (nth k '(3 4 5))))
+              '(nil 0))
+        ; Misfits on both sides, each hand long where its partner is short;
+        ; power balanced
+        (list "misfit" 2
+              '((:hcp (9 12) :s (6 7) :h (0 1)) (:hcp (8 12) :d (6 7) :c (0 1)) (:hcp (9 12) :h (6 7) :s (0 1)))
+              (lambda (h k) (declare (ignore k))
+                  (and (>= (suit-len h 3 0) 5) (<= (suit-len h 3 1) 1) (<= 19 (side-hcp h 0) 21)))
+              nil)
+        ; A 9-card fit for each side, power balanced
+        (list "double-fit" 3
+              '((:hcp (8 12) :s (5 5) :h (0 3)) (:hcp (8 12) :h (5 5) :s (0 2)) (:hcp (8 12) :s (4 4) :h (0 2)))
+              (lambda (h k) (declare (ignore k)) (and (= (suit-len h 3 2) 4) (<= 19 (side-hcp h 0) 21)))
+              nil)
+        ; ♠ 5-3 with trumps 4-1, E's long diamonds forcing N
+        (list "trump-control" 2
+              '((:hcp (13 16) :s (5 5) :d (1 2)) (:hcp (8 11) :s (4 4) :d (5 6)) (:hcp (9 12) :s (3 3)))
+              (lambda (h k) (declare (ignore k)) (= (suit-len h 3 3) 1))
+              '(3 0))
+        ; ♠ 4-4 with shortness in diamonds and clubs opposite each other
+        (list "crossruff" 2
+              '((:hcp (11 14) :s (4 4) :d (0 1) :c (4 5)) nil (:hcp (10 13) :s (4 4) :c (0 1) :d (4 5)))
+              nil
+              '(3 0))
+        ; NT, a weak dummy with ♣ AKQxxx and no outside entry
+        (list "dummy-suit" 2
+              '((:hcp (17 19) :s (3 4) :h (3 4) :d (3 4) :c (1 2 (0 0))) nil (:hcp (9 9) :c (6 6 (9 9))))
+              nil
+              '(nil 0))
+        ; Balanced hands, 25-29 HCP, a tenace AQ against the K
+        (list "tenaces" 2
+              '((:hcp (13 15) :s (3 4) :h (3 4) :d (3 4) :c (3 4)) nil
+                (:hcp (12 14) :s (3 4) :h (3 4) :d (3 4) :c (3 4)))
+              (lambda (h k) (declare (ignore k))
+                  (loop for suit below 4
+                        thereis (flet ((ns (r) (or (member r (nth suit (nth 0 h))) (member r (nth suit (nth 2 h))))))
+                                    (and (ns 12) (ns 10) (not (ns 11))))))
+              nil)
+        ; ♠ AKxxx opposite three small, E with ♠ Qxxx
+        (list "master-trump" 1
+              '((:hcp (13 16) :s (5 5 (7 7))) (:s (4 4 (2 2))) (:hcp (9 12) :s (3 3 (0 1))))
+              nil
+              '(3 0))
+        ; ♠ by N with heart losers, dummy's three trumps needed for ruffing
+        ; them before drawing
+        (list "ruff-first" 2
+              '((:hcp (14 17) :s (5 6) :h (3 3 (0 1))) nil (:hcp (7 10) :s (3 3) :h (0 1)))
+              nil
+              '(3 0))
+        (list "random" 1 nil nil nil)))
+
+; Hands as suits of a deal of defs passing check
+(defun hinttest-hands (defs check k)
+    (let ((deal (and defs (make-instance 'deal :~ (mapcar #'normdef defs)))))
+        (loop repeat 50000
+              for hands = (ignore-errors (mapcar #'suits (if deal (build deal) (random-deal))))
+              when (and hands (or (null check) (funcall check hands k)))
+              return hands
+              finally (error "No deal for ~S" defs))))
+
+; Axes of the deal of formulas as sim-deal picks them, (trump declarer)
+(defun auto-axes (formulas)
+    (let ((objs (formula-hands formulas)))
+        (loop for r in '(0 1)
+              collect (destructuring-bind (suit declarer &rest _) (sim-axis (roll r objs))
+                          (declare (ignore _))
+                          (list (position suit '(c d h s))
+                                (or (position declarer *seats* :test #'equal) 3))))))
+
+; Deals of the scenarios, (name hands contract), generated from seed
+(defun hinttest-deals (seed)
+    (let ((*random-state* (sb-ext:seed-random-state seed)))
+        (loop for (name count defs check contract) in (hinttest-scenarios)
+              append (loop for k below count
+                           collect (list name (hinttest-hands defs check k) contract)))))
+
+(defun hinttest-formulas (hands)
+    (loop for seat below 3
+          collect (format nil "~A: ~A" (nth seat *seats*) (print-hand (nth seat hands)))))
+
+; Prints the deals of run-hinttests with seed and the axes they get
+(defun hinttest-preview (&key (seed 7))
+    (loop for (name hands contract) in (hinttest-deals seed)
+          for n from 1
+          for formulas = (hinttest-formulas hands)
+          do (format t "~%~D ~A: ~{~{~A by ~A~}~^, ~}~%" n name
+                     (mapcar (lambda (a) (list (suitstr (first a)) (nth (second a) *seats*)))
+                             (let ((auto (auto-axes formulas))) (if contract (list contract (second auto)) auto))))
+             (dotimes (s 4) (format t "  ~A  (~D)~%" (hand-str hands s) (hand-hcp (nth s hands))))
+             (unless (equal (mapcar #'suits (formula-hands formulas))
+                            (mapcar (lambda (h) (mapcar (lambda (r) (sort (copy-list r) #'<)) h)) hands))
+                 (format t "  formulas don't give these hands~%"))))
+
+; Generates the scenarios' deals (seeded) and plays each by hints (those
+; numbered in only, or all), saving sims/<prefix>-NN.json, logs and a
+; summary in logdir. Timeout is per deal, shared by its axes.
+(defun run-hinttests (&key (seed 7) (timeout 600) (prefix "hinttest") (logdir "hinttest-logs/") only
+                           (summary "summary.txt"))
+    (ensure-directories-exist logdir)
+    (let ((rows nil))
+        (loop for (name hands contract) in (hinttest-deals seed)
+              for n from 1
+              for id = (format nil "~A-~2,'0D" prefix n)
+              for formulas = (hinttest-formulas hands)
+              for auto = (auto-axes formulas)
+              when (or (null only) (member n only))
+              do (format t "~%=== ~A: ~A ===~%" id name)
+                 (push (list id name (hint-deal formulas (if contract (list contract (second auto)) auto)
+                                                :save id :timeout timeout
+                                                :log (format nil "~A~A.log" logdir id)))
+                       rows)
+                 (with-open-file (o (format nil "~A~A" logdir summary) :direction :output :if-exists :supersede
+                                                                       :external-format :utf-8)
+                     (loop for (id name axes) in (reverse rows)
+                           do (format o "~A ~13A~{ | ~{~A by ~A: play-deal ~D, hints ~A~:[ (best so far)~;~] ~Ds ~D nodes~}~}~%"
+                                      id name
+                                      (mapcar (lambda (a) (destructuring-bind (tr d old tricks done secs nodes) a
+                                                              (list (suitstr tr) (nth d *seats*) old (or tricks "-")
+                                                                    done secs nodes)))
+                                              axes)))))
+        (reverse rows)))
 
 (defclass result ()
     ((success :reader ok?)
