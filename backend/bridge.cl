@@ -3360,17 +3360,28 @@ W: ♣ A1087 ♦ KQ5 ♥ 762 ♠ Q102"))
                (thread (let ((scur data)
                              (dcur mapped))
                          (bt:make-thread (lambda ()
+                                           ; the first one is mapped already: wait
+                                           ; for the next one, then map it
                                            (loop for i from 1 below length
-                                                 do (let ((elem (funcall mapper (car scur))))
+                                                 do (loop while (not (cdr scur))
+                                                          do (sleep 1))
+                                                    (setf scur (cdr scur))
+                                                    (let ((elem (funcall mapper (car scur))))
                                                         (setf (cdr dcur) (list elem))
-                                                        (loop while (not (cdr scur))
-                                                              do (sleep 1))
-                                                        (setf scur (cdr scur) )
                                                         (setf dcur (cdr dcur)))))
                                         :name (or thread-name (format nil "async-map<~A>" mapper))))))
             (setf data mapped)
             (setf threads (cons thread threads))))
     this)
+
+; Each element mapped once, in order: the first one used to be mapped twice
+(test (let* ((n 0)
+             (l (make-instance 'async-list :! (lambda () (incf n)) :len 5))
+             (m (async-map l #'identity)))
+          (mapc #'bt:join-thread (threads m))
+          (data m))
+      '(1 2 3 4 5)
+      equal)
 
 (defmethod cancel ((this async-list))
     (with-slots (threads) this

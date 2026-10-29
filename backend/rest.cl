@@ -213,9 +213,20 @@
             (if in (let ((str (make-string (file-length in))))
                       (subseq str 0 (read-sequence str in)))))))
 
-(defun sim-deal-saved (hands raw-hands)
-    (let ((result (sim-deal hands)))
-        `(:id ,(save-sim raw-hands result) ,@result)))
+(defparameter *hint-sim-timeout* 600)
+
+; Simulation of the deal, saved: by play-deal, or with engine "hints" by the
+; hint search (hint-deal, in the axes play-deal picks), its caches its own
+; so that requests running at once don't share them
+(defun sim-deal-saved (hands raw-hands &optional engine)
+    (if (equal engine "hints")
+        (let ((id (new-sim-id))
+              (*suit-solve-cache* (make-hash-table :test 'equal))
+              (*discard-costs* (make-hash-table)))
+            `(:id ,id ,@(nth-value 1 (hint-deal raw-hands (auto-axes raw-hands) :save id
+                                                :timeout *hint-sim-timeout*))))
+        (let ((result (sim-deal hands)))
+            `(:id ,(save-sim raw-hands result) ,@result))))
 
 ;; Editing play of saved simulations: tricks are removed from the end of
 ;; play or added there. Sequences cut or made by the user have no comment;
@@ -554,7 +565,7 @@
 ; as sim save, each sequence a plan. The search logs to log; the axes share
 ; timeout seconds equally, an axis timing out giving the best line found so
 ; far. Returns per axis (trump declarer play-deal-tricks tricks done
-; seconds nodes).
+; seconds nodes), and the result as sim-deal gives it.
 (defun hint-deal (formulas axes &key save (timeout 600) (log "hint-play.log"))
     (with-open-file (*hint-log* (merge-pathnames log (uiop:getcwd)) :direction :output
                                 :if-exists :supersede :if-does-not-exist :create :external-format :utf-8)
@@ -612,18 +623,17 @@
                                                 :summary (,trump ,declarer ,old ,tricks ,done
                                                           ,(round (- t2 t1) internal-time-units-per-second)
                                                           ,*hint-nodes*))))))))
-            (when save
-                (write-sim save
-                           `(:hands ,formulas
-                             :result (:score ,(apply #'deal-score (mapcar #'axis-contract axes))
-                                      :power ,(loop for axis in axes
-                                                    for trump = (str2suitno (getf axis :trump))
-                                                    collect `(:trump ,(getf axis :trump)
-                                                              :declarer ,(getf axis :declarer)
-                                                              :score ,(getf axis :score)
-                                                              :sequences ,(loop for (plan tricks) in (getf axis :lines)
-                                                                                append (push-plan nil plan tricks trump t))))))))
-            (mapcar (lambda (axis) (getf axis :summary)) axes))))
+            (let ((result `(:score ,(apply #'deal-score (mapcar #'axis-contract axes))
+                            :power ,(loop for axis in axes
+                                          for trump = (str2suitno (getf axis :trump))
+                                          collect `(:trump ,(getf axis :trump)
+                                                    :declarer ,(getf axis :declarer)
+                                                    :score ,(getf axis :score)
+                                                    :sequences ,(loop for (plan tricks) in (getf axis :lines)
+                                                                      append (push-plan nil plan tricks trump t)))))))
+                (when save
+                    (write-sim save `(:hands ,formulas :result ,result)))
+                (values (mapcar (lambda (axis) (getf axis :summary)) axes) result)))))
 
 ;; Test deals for play by hints, saved as sims/hinttest-NN.json
 ; A scenario is (name count defs check contract): defs of the hands N E S
@@ -893,6 +903,60 @@
            `(:status in-progress :job-id ,id
              :data ,(histogram (mapcar (curry #'apply #'append) (select mc))))))))
 
+;; Deals of a group of an MC simulation: the frontend sends the values of a
+;; line of its histogram from the top (prefix), the group being the deals
+;; whose values start with them
+
+; A histogram value as JSON gives it back: symbols by name, nil as nil
+(defun json-value (x)
+    (cond ((null x) nil)
+          ((consp x) (mapcar #'json-value x))
+          ((symbolp x) (symbol-name x))
+          (t x)))
+
+; Do values, as the histogram counts them, fall into the group of prefix?
+; A nil in prefix past the end of values is the line of rows ending there.
+(defun values-in-group? (vals prefix)
+    (loop for p in prefix
+          for rest = vals then (cdr rest)
+          always (if rest (equal (json-value (car rest)) p) (null p))))
+
+(test (values-in-group? '(s 10 nt 9) '("S" 10)) t eq)
+(test (values-in-group? '(s 10 nt 9) '("S" 11)) nil eq)
+(test (values-in-group? '(s 10) '("S" 10 nil)) t eq)
+(test (values-in-group? '(s 10 nt 9) '("S" 10 nil)) nil eq)
+
+; Deals of job's group of prefix, of measures (else all of its props): their
+; count and up to limit of them, each with its hands as formulas N E S W
+; and its values
+(defun mc-group-deals (job prefix measures &optional (limit 100))
+    (let* ((rows (select job :fields (cons 'hands (or measures (slot-value job 'props)))))
+           (group (loop for row in rows
+                        for i from 0
+                        for vals = (apply #'append (rest row))
+                        when (values-in-group? vals prefix)
+                        collect (list i (first row) vals))))
+        `(:count ,(length group)
+          :deals ,(loop for (i hands vals) in group
+                        repeat limit
+                        collect `(:index ,i
+                                  :hands ,(loop for suits in (mapcar #'suits hands)
+                                                for seat in *seats*
+                                                collect (format nil "~A: ~A" seat (print-hand suits)))
+                                  :values ,vals)))))
+
+; Setups of MC jobs by id: what the frontend sends with a job (its hands
+; and measures as a JSON string), given back when it connects to the job
+; again
+(defparameter *job-setups* (make-hash-table :synchronized t))
+
+; mc-deal, keeping setup of the job
+(defun mc-deal-setup (defs measures setup)
+    (let ((ans (mc-deal defs measures)))
+        (if (stringp setup)
+            (setf (gethash (getf ans :job-id) *job-setups*) setup))
+        ans))
+
 (defun hand-or-def-parser (defs)
     (fold #'combine
           (make-instance 'result)
@@ -952,10 +1016,10 @@
           (simple-endpoint env '(:|user| :|since|) (curry #'auction *table*)
                                :parse-args (list *user-validator*)))
       ((string= path "/api/simdeal")
-          (simple-endpoint env '(:|hands| :|hands|) #'sim-deal-saved
+          (simple-endpoint env '(:|hands| :|hands| :|engine|) #'sim-deal-saved
                                :parse-args (list (f* (curry #'mapcar #'hand-parser)
                                                      (curry #'fold #'combine (make-instance 'result)))
-                                                 nil)))
+                                                 nil nil)))
       ((string= path "/api/simedit")
        (let ((request (jonathan:parse (read-body env))))
           (handler-case (json-response 200 (sim-edit (getf request :|id|) (getf request :|axis|)
@@ -968,14 +1032,21 @@
           (if saved `(200 (:content-type "application/json") (,saved))
                     (json-response 404 `(:status :not-found)))))
       ((string= path "/api/mc")
-          (simple-endpoint env '(:|defs| :|measures|) #'mc-deal'
-                               :parse-args (list #'hand-or-def-parser #'measure-parser)))
+          (simple-endpoint env '(:|defs| :|measures| :|setup|) #'mc-deal-setup
+                               :parse-args (list #'hand-or-def-parser #'measure-parser nil)))
+      ((and (substr= "/api/mc/" path) (search "/deals" path))
+       (let ((job (get-case *jobs* (parse-integer path :start (length "/api/mc/") :junk-allowed t))))
+          (if job (simple-endpoint env '(:|prefix| :|measures|)
+                                   (lambda (prefix measures) (mc-group-deals job prefix measures))
+                                   :parse-args (list nil #'measure-sym-parser))
+                  (json-response 404 `(:status :not-found)))))
       ((substr= "/api/mc/" path)
        (let ((job-id (read-from-string (subseq path (length "/api/mc/")))))
           (let ((job (get-case *jobs* job-id)))
              (if job (simple-endpoint env '(:|measures|)
                         (lambda (measures)
                             `(:status ,(if (threads job) :in-progress :success)
+                              :setup ,(gethash job-id *job-setups*)
                               :data ,(histogram (mapcar (curry #'apply #'append)
                                                     (if measures (select job :fields measures)
                                                                  (select job))))))

@@ -181,6 +181,28 @@ class Selection {
             return true;
         }
     }
+
+    // Plain object of the hand (sets as arrays) for JSON, and back
+    snapshot() {
+        return {
+            handid: this.handid,
+            mode: this.mode,
+            data: this.mode === HandMode.SELECT
+                ? Object.fromEntries(suits.map((suit) => [suit, [...this.data[suit]]]))
+                : this.data
+        };
+    }
+
+    static fromSnapshot(snap) {
+        const sel = new Selection(snap.handid);
+        sel.setMode(snap.mode);
+        if(snap.mode === HandMode.SELECT) {
+            for(const suit of suits) sel.data[suit] = new Set(snap.data[suit] || []);
+        } else {
+            sel.data = snap.data;
+        }
+        return sel;
+    }
 }
 
 class Hands {
@@ -213,6 +235,14 @@ class Hands {
         return this.data.length <= 4 && this.edited().isValid();
     }
 
+    // Hands pushed as snapshots of Selection, a new one edited after them
+    static fromSnapshots(snaps) {
+        const ans = new Hands();
+        ans.data = snaps.map((snap) => Selection.fromSnapshot(snap));
+        ans.data.push(new Selection(handIds[ans.data.length]));
+        return ans;
+    }
+
     static fromFormulas(formulas) {
         const ans = new Hands();
         ans.data = formulas.map((str, i) => Selection.fromFormula(handIds[i], str));
@@ -224,6 +254,9 @@ class Hands {
 const hands = ref(new Hands());
 const edited = computed(() => hands.value.edited());
 const measures = ref("");
+// Play engine of a deal simulation: "deal" (play-deal) or "hints" (hint search)
+const engine = ref("deal");
+const simulating = ref(false);
 
 const suitIndex = ref(0)
 const currentSuit = computed(() => suits[suitIndex.value])
@@ -244,7 +277,8 @@ function prevSuit() { suitIndex.value = (suitIndex.value - 1 + suits.length) % s
 const formula = computed(() => edited.value.formula()); 
 
 const simulationReport = ref("");
-async function playSimulation() {
+async function playSimulation(formulas = hands.value.pushed().map((hand)=>hand.formula())) {
+    newMcToken();
     const response = await fetch("api/simdeal", {
                                     method: "POST",
                                     headers: {
@@ -252,7 +286,8 @@ async function playSimulation() {
                                         'Content-Type': 'application/json',
                                     },
                                     body: JSON.stringify({
-                                        hands: hands.value.pushed().map((hand)=>hand.formula())
+                                        hands: formulas,
+                                        engine: engine.value
                                     })
                                 });
     if(!response.ok) {
@@ -268,14 +303,46 @@ async function playSimulation() {
     choices.value = null;
     if(body["ID"]) {
         const url = new URL(window.location);
+        url.searchParams.delete("play");
+        url.searchParams.delete("engine");
         url.searchParams.set("sim", body["ID"]);
         window.history.replaceState(null, "", url);
     }
     loadHints();
 }
 
+// URL of a page playing the deal of formulas by engine (see onMounted)
+function playUrl(formulas) {
+    const url = new URL(window.location);
+    url.search = "";
+    url.searchParams.set("play", JSON.stringify(formulas));
+    url.searchParams.set("engine", engine.value);
+    return url.toString();
+}
+
+// Plays the deal given as ?play=<formulas as JSON>&engine=<engine>, as if its
+// hands were pushed and the simulation started
+async function playFromUrl(param, eng) {
+    let formulas;
+    try {
+        formulas = JSON.parse(param);
+    } catch(e) {
+        alert(`Wrong deal in the URL: ${param}`);
+        return;
+    }
+    hands.value = Hands.fromFormulas(formulas);
+    if(eng) engine.value = eng;
+    simulating.value = true;
+    try {
+        await playSimulation(formulas);
+    } finally {
+        simulating.value = false;
+    }
+}
+
 // Restore a saved deal simulation given as ?sim=<id>
 async function restoreSimulation(id) {
+    newMcToken();
     const response = await fetch("api/simdeal/" + encodeURIComponent(id));
     if(!response.ok) {
         const text = await response.text();
@@ -371,9 +438,14 @@ async function editPlay(axisNo, action, extra = {}) {
 }
 
 onMounted(() => {
-    const id = new URLSearchParams(window.location.search).get("sim");
+    const params = new URLSearchParams(window.location.search);
+    const id = params.get("sim");
     if(id) {
         restoreSimulation(id);
+    } else if(params.get("play")) {
+        playFromUrl(params.get("play"), params.get("engine"));
+    } else if(params.get("mc")) {
+        connectMc(params.get("mc"), params.get("measures"));
     }
 });
 
@@ -504,37 +576,73 @@ function mcRepVal(x) {
         return x;
 }
 
+// Rows of the histogram table: cells to show, and path, the values of the
+// line from the top (null where the deals' values end), which names its group
 function mcTable (data) {
     var ans = [];
 
-    function self(indent, cell) {
+    function self(indent, cell, prefix) {
         var row = Array(indent).fill("»");
 
-        var levels;
+        var levels, vals;
         if(Array.isArray(cell[0])) {
             row = row.concat(cell[0].map(mcRepVal));
             row.push(probabilityPercent(cell[1]));
             levels = cell[0].length;
+            vals = cell[0].length ? cell[0] : [null];
         } else {
             row.push(mcRepVal(cell[0]))
             row.push(probabilityPercent(cell[1]));
             levels = 1;
+            vals = [cell[0]];
         }
 
-        ans.push(row);
+        const path = prefix.concat(vals);
+        ans.push({ cells: row, path: path });
         for(var subcase of cell.splice(2)) {
-            self(indent+levels, subcase);
+            self(indent+levels, subcase, path);
         }
     }
 
     for(var x of data) {
-        self(0, x);
+        self(0, x, []);
     }
 
     return ans;
 }
 
+// Deals of a group of the MC simulation: { path, label, count, deals }
+const mcGroup = ref(null);
+async function loadGroup(row) {
+    const response = await fetch("api/mc/" + simulationReport.value['JOB'] + "/deals", {
+                                   method: "POST",
+                                   headers: {
+                                      'Accept': 'application/json',
+                                      'Content-Type': 'application/json',
+                                   },
+                                   body: JSON.stringify({
+                                        prefix: row.path,
+                                        measures: measures.value.split(" ").filter(Boolean)
+                                   })
+                               });
+    if(!response.ok) {
+        const text = await response.text();
+        console.error("Fetch failed:", response.status, response.statusText, text);
+        alert(`Backend error ${response.status}: ${response.statusText}\n${text}`);
+        return;
+    }
+    const body = await response.json();
+    mcGroup.value = {
+        path: row.path,
+        label: row.path.map((v) => v === null ? "(end)" : mcRepVal(v)).join(" "),
+        count: body['COUNT'],
+        deals: body['DEALS']
+    };
+}
+
+
 async function mcSimulation(inMeasures) {
+    const token = newMcToken();
     var response = await fetch("api/mc", {
                                    method: "POST",
                                    headers: {
@@ -543,7 +651,11 @@ async function mcSimulation(inMeasures) {
                                    },
                                    body: JSON.stringify({
                                        defs: hands.value.pushed().map((hand) => hand.restDef()),
-                                       measures: inMeasures
+                                       measures: inMeasures,
+                                       setup: JSON.stringify({
+                                           hands: hands.value.pushed().map((hand) => hand.snapshot()),
+                                           measures: measures.value
+                                       })
                                    })
                                });
 
@@ -554,13 +666,44 @@ async function mcSimulation(inMeasures) {
         return;
     }
 
-    var body = await response.json();
+    const body = await response.json();
+    if(token !== mcToken) return;
     const jid = body["JOB-ID"];
-    simulationReport.value = { DATA: mcTable(body['DATA']) };
+    mcGroup.value = null;
+    simulationReport.value = { DATA: mcTable(body['DATA']), JOB: jid, STATUS: body["STATUS"] };
+    mcUrl(jid);
+    // Polled on without holding the simulate button: starting another
+    // simulation retires this one (newMcToken)
+    if(body["STATUS"] === "IN-PROGRESS") {
+        setTimeout(() => pollMc(jid, token), 5000);
+    }
+}
 
-    while(body["STATUS"] === "IN-PROGRESS") {
-        await new Promise(resolve => setTimeout(resolve, 5000));
-        response = await fetch("api/mc/" + jid, {
+// Token of the MC job shown: starting or opening another simulation takes a
+// new one, so that polling of the job shown before stops and its answers
+// still on the way are dropped (the job itself runs on in the backend)
+let mcToken = 0;
+function newMcToken() {
+    return ++mcToken;
+}
+
+// Puts MC job jid and the measures in the URL (?mc=<jid>&measures=...), so
+// that reloading the page or opening the link later connects to the job again
+function mcUrl(jid) {
+    const url = new URL(window.location);
+    url.search = "";
+    url.searchParams.set("mc", jid);
+    if(measures.value.trim()) url.searchParams.set("measures", measures.value.trim());
+    window.history.replaceState(null, "", url);
+}
+
+// Shows the histogram of MC job jid, every 5 seconds while it runs and token
+// is the current one. With restore, the hands and measures the job was
+// started with come back too. The job lives in the backend's memory: a
+// restart of it loses the job.
+async function pollMc(jid, token, restore = false) {
+    while(token === mcToken) {
+        const response = await fetch("api/mc/" + jid, {
                                    method: "POST",
                                    body: JSON.stringify({
                                         measures: measures.value.split(" ").filter(Boolean)
@@ -571,24 +714,56 @@ async function mcSimulation(inMeasures) {
                                    }
                                });
 
+        if(token !== mcToken) return;
         if(!response.ok) {
             const text = await response.text(); // get response body (error message)
             console.error("Fetch failed:", response.status, response.statusText, text);
-            alert(`Backend error ${response.status}: ${response.statusText}\n${text}`);
+            alert(`Cannot get MC job ${jid}: ${response.status} ${response.statusText}\n${text}`);
             return;
         }
 
-        body = await response.json();
-        simulationReport.value = { DATA: mcTable(body['DATA']) };
+        const body = await response.json();
+        if(token !== mcToken) return;
+        if(restore && typeof body["SETUP"] === "string") {
+            const setup = JSON.parse(body["SETUP"]);
+            hands.value = Hands.fromSnapshots(setup.hands);
+            measures.value = setup.measures || "";
+            restore = false;
+        }
+        simulationReport.value = { DATA: mcTable(body['DATA']), JOB: jid, STATUS: body["STATUS"] };
+        if(body["STATUS"] !== "IN-PROGRESS") return;
+        await new Promise(resolve => setTimeout(resolve, 5000));
     }
 }
 
+// Connects to MC job jid run before (its id from the URL or typed in)
+const mcJobInput = ref("");
+async function connectMc(jid, measureStr = measures.value) {
+    jid = String(jid).trim();
+    if(!/^\d+$/.test(jid)) {
+        alert(`MC job id is a number, not "${jid}"`);
+        return;
+    }
+    const token = newMcToken();
+    measures.value = measureStr || "";
+    mcGroup.value = null;
+    simId.value = null;
+    choices.value = null;
+    mcUrl(jid);
+    await pollMc(jid, token, true);
+}
+
 async function runSimulation() {
-    if(hands.value.pushed().filter((hand) => hand.mode === HandMode.RANDOM).length == 0
-          && hands.value.pushed().length >= 3) {
-       return playSimulation();
-    } else {
-       return mcSimulation(measures.value.split(" ").filter(Boolean));
+    simulating.value = true;
+    try {
+        if(hands.value.pushed().filter((hand) => hand.mode === HandMode.RANDOM).length == 0
+              && hands.value.pushed().length >= 3) {
+           return await playSimulation();
+        } else {
+           return await mcSimulation(measures.value.split(" ").filter(Boolean));
+        }
+    } finally {
+        simulating.value = false;
     }
 }
 
@@ -597,11 +772,24 @@ async function runSimulation() {
 <template>
   <div class="min-h-screen flex flex-col items-center justify-center bg-gray-100 text-gray-800">
 
-    <!-- Pushed hands view -->
+    <!-- Connecting to an MC job run before, by its id -->
+    <div class="mb-4 flex gap-2 items-center text-sm">
+      <span>MC job</span>
+      <input v-model="mcJobInput" @keyup.enter="connectMc(mcJobInput)"
+             placeholder="id" size="5"
+             class="bg-white rounded-xl px-2 py-1 border text-center" />
+      <button @click="connectMc(mcJobInput)" :disabled="simulating || !mcJobInput.trim()"
+              class="px-3 py-1 rounded-xl font-semibold"
+              :class="simulating || !mcJobInput.trim() ? 'bg-gray-300' : 'bg-red-200 hover:bg-red-300'">
+        Open
+      </button>
+    </div>
+
+    <!-- Pushed hands view, also for an MC job connected to without hands -->
     <div class="bg-white shadow-lg rounded-2xl p-6 mb-4"
          :class="simulationReport && simulationReport['SCORE'] ? 'w-fit max-w-full' : 'w-96'"
-         v-if="hands.hasPushed()">
-      <h3 class="text-center">Pushed hands:</h3>
+         v-if="hands.hasPushed() || (simulationReport && simulationReport['DATA'])">
+      <h3 class="text-center" v-if="hands.hasPushed()">Pushed hands:</h3>
       <ul>
         <li v-for="hand in hands.pushed()"
             class="bg-gray-200 rounded-2xl p-4 shadow-sm text-center mb-2 mt-2">
@@ -616,30 +804,68 @@ async function runSimulation() {
 
       <!-- Start simulation button -->
         
-      <button 
-        @click="runSimulation()" 
-        :disabled="hands.pushed().length == 0"
-        class="mt-4 w-full py-2 rounded-xl font-semibold"
-        :class="{
-            'bg-gray-500': hands.pushed().length == 0,
-            'bg-red-200 hover:bg-red-300': hands.pushed().length > 0 
-        }"
-      >
-        Start simulation
-      </button>
+      <div class="mt-4 flex gap-2">
+        <button
+          @click="runSimulation()"
+          :disabled="hands.pushed().length == 0 || simulating"
+          class="flex-1 py-2 rounded-xl font-semibold"
+          :class="{
+              'bg-gray-500': hands.pushed().length == 0 || simulating,
+              'bg-red-200 hover:bg-red-300': hands.pushed().length > 0 && !simulating
+          }"
+        >
+          {{ simulating ? "Simulating…" : "Start simulation" }}
+        </button>
+        <!-- Play engine, for deals of known hands -->
+        <select v-model="engine" :disabled="simulating"
+                title="Play engine for a deal of known hands"
+                class="bg-gray-200 rounded-xl px-2 border">
+          <option value="deal">Play-deal</option>
+          <option value="hints">Hints search</option>
+        </select>
+      </div>
 
       <!-- Simulation report -->
       <!-- 1. MC simulation -->
       <div v-if="simulationReport && simulationReport['DATA']" class="mt-8">
         <p>Probability profile for that kind of deal:</p>
+        <p class="text-sm text-gray-600">
+          MC job {{ simulationReport['JOB'] }},
+          {{ simulationReport['STATUS'] === 'IN-PROGRESS' ? 'still running' : 'done' }}
+        </p>
 
         <table class="mt-2">
-            <tr v-for="row of simulationReport['DATA']">
-                <td v-for="cell of row" class="pl-2 pr-2 text-center">
+            <tr v-for="row of simulationReport['DATA']"
+                @click="loadGroup(row)"
+                title="Show deals of this group"
+                class="cursor-pointer hover:bg-red-100"
+                :class="{ 'bg-red-200': mcGroup && JSON.stringify(mcGroup.path) === JSON.stringify(row.path) }">
+                <td v-for="cell of row.cells" class="pl-2 pr-2 text-center">
                     {{cell}}
                 </td>
             </tr>
         </table>
+
+        <!-- Deals of the group clicked, each playable by the engine chosen -->
+        <div v-if="mcGroup" class="mt-6">
+          <p>
+            Deals of <b>{{ mcGroup.label }}</b>: {{ mcGroup.count }}
+            <template v-if="mcGroup.count > mcGroup.deals.length">
+              (first {{ mcGroup.deals.length }} shown)
+            </template>
+          </p>
+          <div v-for="deal in mcGroup.deals" :key="deal['INDEX']"
+               class="mt-2 bg-gray-100 rounded-xl p-2 flex flex-wrap items-center gap-x-4 gap-y-1">
+            <span v-for="hand in deal['HANDS']" class="font-mono text-sm">{{ hand }}</span>
+            <span class="text-sm text-gray-600">{{ deal['VALUES'].map(mcRepVal).join(" ") }}</span>
+            <!-- A plain link: the new tab plays the deal itself (?play=) -->
+            <a :href="playUrl(deal['HANDS'])" target="_blank"
+               :title="'Play this deal by ' + (engine === 'hints' ? 'hints search' : 'play-deal') + ' in a new tab'"
+               class="ml-auto px-3 py-1 rounded-xl text-sm font-semibold bg-red-200 hover:bg-red-300">
+              Play
+            </a>
+          </div>
+        </div>
       </div>
 
       <!-- 2. Deal simulation -->
