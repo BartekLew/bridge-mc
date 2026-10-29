@@ -4122,6 +4122,104 @@ W: ♣ A1087 ♦ KQ5 ♥ 762 ♠ Q102"))
     (loop for seat in (side-seats side)
           maximize (establish-gain hands side suit nil seat nil)))
 
+(defparameter *discard-costs* (make-hash-table))
+
+; Tricks seat's side loses in suit by ranks when seat discards his lowest
+; card of it, counting the tricks it makes whoever leads the suit: the
+; fewer of the opponents leading it (theirs-count) and of the side leading
+; it from either hand. A long card counts, as does a guard (the x of Kx);
+; W's QJ7654 against S's K109 make the 9 a trick only if W leads them.
+; With lead :theirs or :ours the tricks are counted only with the
+; opponents or only with the side leading it: ranks can't tell who will
+; have to (N-S lead their spades into W's guarded Q, W never his long
+; clubs without an entry), so the defence's discards by either are
+; variants (discard-variants). Costs are cached by the holdings of the suit,
+; the seat and lead.
+(defun discard-cost (hands seat suit &optional (lead :both))
+    (let ((key (+ (* 16 (holding-key (suit-holdings hands suit)))
+                  (* 4 (position lead '(:both :theirs :ours)))
+                  seat)))
+        (multiple-value-bind (cost found) (gethash key *discard-costs*)
+            (if found
+                cost
+                (progn
+                    (if (> (hash-table-count *discard-costs*) 200000) (clrhash *discard-costs*))
+                    (setf (gethash key *discard-costs*) (discard-cost-1 hands seat suit lead)))))))
+
+(defun discard-cost-1 (hands seat suit lead)
+    (let* ((side (mod seat 2))
+           (after (loop for hand in hands
+                        for s from 0
+                        collect (if (= s seat) (without-card hand (list suit (first (nth suit hand)))) hand))))
+        (flet ((sure (hs)
+                   (flet ((theirs () (theirs-count hs side suit))
+                          (ours () (or (loop for s in (side-seats side)
+                                             when (nth suit (nth s hs)) maximize (rank-count hs side suit s))
+                                       0)))
+                       (ecase lead
+                           (:both (min (theirs) (ours)))
+                           (:theirs (theirs))
+                           (:ours (ours))))))
+            (- (sure hands) (sure after)))))
+
+; Card seat discards: one of a suit costing least (discard-cost by lead),
+; outside trumps, chosen among those by keep-discard (keep and tops as
+; there)
+(defun position-discard (hands seat keep tops trump &optional (lead :both))
+    (let* ((suits (nth seat hands))
+           (costs (loop for suit from 0 below 4
+                        collect (and (nth suit suits) (not (eql suit trump))
+                                     (discard-cost hands seat suit lead))))
+           (least (reduce #'min (remove nil costs) :initial-value most-positive-fixnum)))
+        (keep-discard (if (some #'identity costs)
+                          (loop for ranks in suits
+                                for c in costs
+                                collect (and (eql c least) ranks))
+                          suits)
+                      keep tops trump)))
+
+; Deal 5 of hinttest3, NT, N on lead: N ♠ KJ9753 ♥ J ♦ Q83, E ♥ A7643
+; ♦ K10754, S ♥ KQ10985 ♦ J ♣ K109, W ♠ Q64 ♥ 2 ♣ QJ7654. S's ♥ 5 makes a
+; trick once E's A is out, his ♣ 9 none: on the ♠ K he discards the club.
+(defparameter *discard-hands*
+    '((nil (1 6 10) (9) (1 3 5 7 9 11)) (nil (2 3 5 8 11) (1 2 4 5 12) nil)
+      ((7 8 11) (9) (3 6 7 8 10 11) nil) ((2 3 4 5 9 10) nil (0) (2 4 10))))
+
+(test (mapcar (lambda (suit) (discard-cost *discard-hands* 2 suit)) '(0 1 2)) '(0 1 1) equal)
+
+; Discards of seat worth trying, the one by position-discard first, then
+; ones costing least by a single way of leading the suits
+(defun discard-choices (hands seat keep tops trump)
+    (remove-duplicates (mapcar (lambda (lead) (position-discard hands seat keep tops trump lead))
+                               '(:both :theirs :ours))
+                       :test #'equal :from-end t))
+
+; Tricks like trick, led from leader, in which an opponent of leader
+; discards another card of discard-choices
+(defun discard-variants (hands leader trump trick)
+    (loop for s in (trick-seats leader)
+          for i from 0
+          for card = (nth i trick)
+          when (and (/= (mod s 2) (mod leader 2))
+                    (not (eql (first card) (first (first trick))))
+                    (not (eql (first card) trump)))
+          append (loop for alt in (discard-choices hands s nil (side-tops hands (+ s 1)) trump)
+                       unless (equal alt card)
+                       collect (loop for c in trick
+                                     for j from 0
+                                     collect (if (= j i) alt c)))))
+
+; Deal 5 of hinttest4, NT, after six tricks: N ♠ KJ9753 ♦ A, E ♥ 7643
+; ♦ 1075, S ♥ KQ1098 ♣ K10, W ♠ Q6 ♣ QJ765. On N's ♦ A W keeps his ♠ Q
+; guarded, discarding a club: his clubs make nothing, as he can't get in.
+; By ranks the club costs a trick and the spade none when E-W lead
+; spades, so both are variants; N-S take six more tricks, not seven.
+(defparameter *guard-hands*
+    '((nil (12) nil (1 3 5 7 9 11)) (nil (3 5 8) (1 2 4 5) nil)
+      ((8 11) nil (6 7 8 10 11) nil) ((3 4 5 9 10) nil nil (4 10))))
+
+(test (discard-choices *guard-hands* 3 nil (list 11 12 11 11) nil) '((3 4) (0 3)) equal)
+
 ; N ♠ AKQ2 ♥ K43 ♦ A72 ♣ 654, E ♠ J1093 ♥ AQ2 ♦ KQJ ♣ 987,
 ; S ♠ 87 ♥ J1098 ♦ 1098 ♣ AKQJ, W ♠ 654 ♥ 765 ♦ 6543 ♣ 1032
 (defparameter *establish-hands*
@@ -4185,14 +4283,14 @@ W: ♣ A1087 ♦ KQ5 ♥ 762 ♠ Q102"))
           collect (reduce #'max (suit-ranks hands (side-seats (mod seat 2)) suit) :initial-value -1)))
 
 ; Trick in which seat leads his highest card in suit, his opponents
-; following low or discarding by keep-discard
+; following low or discarding by position-discard
 (defun cash-trick (hands seat trump suit keep)
     (build-trick hands seat trump
                  (cons (cons seat (list suit (car (last (nth suit (nth seat hands))))))
                        (loop for s in (side-seats (- 1 (mod seat 2)))
                              collect (cons s (if (nth suit (nth s hands))
                                                  (list suit (first (nth suit (nth s hands))))
-                                                 (keep-discard (nth s hands) keep (side-tops hands seat) trump)))))))
+                                                 (position-discard hands s keep (side-tops hands seat) trump)))))))
 
 ; Tricks the opponents of seat gain by seat being on lead in hands, or nil
 ; when he can escape. In a suit where all his cards beat theirs he cashes
@@ -4234,8 +4332,8 @@ W: ♣ A1087 ♦ KQ5 ♥ 762 ♠ Q102"))
                                              (cons seat (list suit (first ranks)))
                                              (cons partner (if follow
                                                                (list suit follow)
-                                                               (keep-discard (nth partner hands) nil
-                                                                             (side-tops hands seat) trump)))))))
+                                                               (position-discard hands partner nil
+                                                                                 (side-tops hands seat) trump)))))))
                  (and (= (trick-taker trick leader trump) seat) trick)))))
 
 ; Throw-in trick of plan (:endplay suit seat), nil unless seat's opponents
@@ -4259,12 +4357,13 @@ W: ♣ A1087 ♦ KQ5 ♥ 762 ♠ Q102"))
     '((nil (5) (1 2 11) (0)) (nil (10 11) (10 12) (9))
       (nil (8) (6 7 8 9) nil) (nil (3 4) (3 4 5) nil)))
 
-; EW make both hearts when NS lead them, only the A when E has to
+; EW make both hearts when NS lead them, only the A when E has to. On the
+; throw-in S discards the ♦ 10, worth nothing, keeping his four hearts.
 (test (theirs-count *endplay-hands* 1 2) 2 eql)
 (test (values (solve-suit *endplay-hands* 1 2 nil 1 :stuck)) 1 eql)
 (test (lead-losses *endplay-hands* 1) '((2 . 1)) equal)
 (test (endplay-trick *endplay-hands* 0 nil 3 1)
-      '((3 0) (3 9) (2 6) (1 3))
+      '((3 0) (3 9) (1 8) (1 3))
       equal)
 
 ; ♠ trumps, all drawn, N on lead: N ♥ K43 ♦ 72, E ♥ AQ2 ♦ KQ, S ♣ A ♥ J1098,
@@ -4425,11 +4524,11 @@ W: ♣ A1087 ♦ KQ5 ♥ 762 ♠ Q102"))
           when (= (mod seat 2) side)
           sum (+ (second card) (if (eql (first card) trump) 13 0))))
 
-; Cards of a trick in suit of suit-solve moves, discards by keep-discard
+; Cards of a trick in suit of suit-solve moves, discards by position-discard
 (defun moves-trick (hands leader trump suit moves)
     (loop for m in moves
           for s in (trick-seats leader)
-          collect (cond ((null m) (keep-discard (nth s hands) nil (side-tops hands (+ s 1)) trump))
+          collect (cond ((null m) (position-discard hands s nil (side-tops hands (+ s 1)) trump))
                         ((= (car m) 0) (list suit (cdr m)))
                         (t (list trump (cdr m))))))
 
@@ -4635,7 +4734,8 @@ W: ♣ A1087 ♦ KQ5 ♥ 762 ♠ Q102"))
 ; take the last trick), the first found by the order of solved-tricks. A
 ; trick an opponent could ruff ends a line before it, as does a later one
 ; in which an opponent could duck or beat a card so that another hand takes
-; it (duck-variants): the defence chooses that.
+; it (duck-variants) or discard another card (discard-variants): the
+; defence chooses that.
 (defun plan-lines (hands leader trump plan)
     (let ((side (mod leader 2))
           (plan (list (first plan) (second plan) nil))
@@ -4650,7 +4750,8 @@ W: ♣ A1087 ♦ KQ5 ♥ 762 ♠ Q102"))
                                     (null (nth (plan-suit plan trump) (nth leader hands))))
                             (dolist (trick (solved-tricks hands leader trump plan))
                                 (unless (or (ruff-variants hands leader trump plan trick)
-                                            (and (> n 0) (duck-variants hands leader trump plan trick nil)))
+                                            (and (> n 0) (or (duck-variants hands leader trump plan trick nil)
+                                                             (discard-variants hands leader trump trick))))
                                     (let ((taker (trick-taker trick leader trump)))
                                         (dolist (line (if (= (mod taker 2) side)
                                                           (walk (play-trick hands leader trick) taker (+ n 1) taker)
@@ -4667,7 +4768,9 @@ W: ♣ A1087 ♦ KQ5 ♥ 762 ♠ Q102"))
         (loop
             (if (plan-done? hands leader trump plan (length tricks)) (return))
             (let ((options (plan-options hands leader trump plan)))
-                (if (or (null options) (and tricks (rest options))) (return))
+                (if (or (null options) (and tricks (or (rest options)
+                                                       (discard-variants hands leader trump (first options)))))
+                    (return))
                 (push (first options) tricks)
                 (if (rest options) (return-from step-plan-tricks (values tricks options)))
                 (setf hands (play-trick hands leader (first options))
@@ -4763,6 +4866,9 @@ W: ♣ A1087 ♦ KQ5 ♥ 762 ♠ Q102"))
 (test (plan-tricks *lead-hands* 1 2 '(:cash 0 3))
       '(((0 1) (0 0) (0 9) (0 5)) ((0 6) (0 7) (0 11) (0 2)) ((0 4) (0 3) (0 12) (0 8)))
       equal)
+
+; *discard-hands*: on N's ♠ K S keeps his long hearts, discarding the ♣ 9
+(test (nth 2 (first (plan-tricks *discard-hands* 0 nil '(:cash 3 nil)))) '(0 7) equal)
 
 ; Neither leading ♦ QJ97 into N's K10 nor drawing trumps with 6 against 7
 (test (intersection '((:establish 1 nil) (:draw 2 nil) (:draw-all 2 nil))
@@ -4919,8 +5025,9 @@ W: ♣ A1087 ♦ KQ5 ♥ 762 ♠ Q102"))
 ; either hand of the side (end-variants, each its own plan), or the ways the
 ; defence can play its first trick, each just that trick: ruffing or not
 ; (the line then ending after its first trick too), ducking or not
-; (duck-variants). Drawing trumps keeping the lead has drawing all of them
-; as another plan. Lines of a plan alike are given once.
+; (duck-variants), discarding one card or another (discard-variants).
+; Drawing trumps keeping the lead has drawing all of them as another plan.
+; Lines of a plan alike are given once.
 (defun plan-variants (hands leader trump plan)
     (let ((ans nil))
         (flet ((add (v line)
@@ -4936,7 +5043,9 @@ W: ♣ A1087 ♦ KQ5 ♥ 762 ♠ Q102"))
                             (add v line)
                             (if (plan-mode (first v))
                                 (dolist (alt (duck-variants hands leader trump v (first line)))
-                                    (add v (list alt)))))))))
+                                    (add v (list alt))))
+                            (dolist (alt (discard-variants hands leader trump (first line)))
+                                (add v (list alt))))))))
         (reverse ans)))
 
 ; E's clubs, cashed ending in E or in W, each with S covering the first
@@ -4989,7 +5098,8 @@ W: ♣ A1087 ♦ KQ5 ♥ 762 ♠ Q102"))
 ; trumps, so leading it doesn't establish it but forces E (his four trumps
 ; need drawing), E and W choosing whether to ruff, N overruffing W. N
 ; ruffing it high would gain no trump trick. In hearts E may also duck S's
-; 8. Drawing all trumps and ducking diamonds are plays of their own.
+; 8. Drawing all trumps and ducking diamonds are plays of their own. Not
+; ruffing, W discards a heart, keeping his long fourth diamond.
 (test (mapcar (lambda (h) (cons (first h) (mapcar #'first (second h)))) (plan-hints *force-hands* 2 3))
       '(((:draw 3 nil) (:draw 3 nil)) ((:draw-all 3 nil) (:draw-all 3 nil))
         ((:cash 1 nil) (:cash 1 nil)) ((:duck 1 nil) (:duck 1 nil))
@@ -4997,7 +5107,7 @@ W: ♣ A1087 ♦ KQ5 ♥ 762 ♠ Q102"))
         ((:force 0 1) (:force 0 1) (:force 0 1) (:force 0 1)))
       equal)
 (test (nth-value 1 (plan-tricks *force-hands* 2 3 '(:establish 0 nil)))
-      '(((0 12) (1 1) (1 0) (2 0)) ((0 12) (3 2) (3 10) (2 0)) ((0 12) (1 1) (1 0) (3 1)))
+      '(((0 12) (2 3) (1 0) (2 0)) ((0 12) (3 2) (3 10) (2 0)) ((0 12) (2 3) (1 0) (3 1)))
       equal)
 
 ; ♠ trumps, N on lead with ♥ QJ, E ♥ K54, S ♥ A6, W void with ♠ KQJ10, to
@@ -5051,14 +5161,17 @@ W: ♣ A1087 ♦ KQ5 ♥ 762 ♠ Q102"))
 ; *lead-hands*, ♠ trumps, after N cashed ♦ K and 10 to the A: S leads a
 ; diamond for N to ruff with the 3, W ruffing first with the 5 or not; S
 ; establishes diamonds or clubs, cashes ♥ Q or ducks it, E taking it with
-; the K or not (no hint failed on the ruff)
+; the K or not (no hint failed on the ruff). Establishing diamonds, N
+; discards a club, keeping his six hearts; W discards the ♥ 2 or the ♣ 8.
 (test (mapcar (lambda (h) (cons (first h) (mapcar #'second (second h))))
               (plan-hints '(((5 7 8) nil (1 4 5 6 9 12) (1 2)) ((1 4 11) (9 10) (8 11) (8 9 11 12))
                             ((0 2 3 10) (2 4 6) (10) (4 7 10)) ((6 9 12) nil (0 2 3 7) (0 3 5 6)))
                           2 3))
       '(((:establish 0 nil) (((0 0) (0 6) (0 5) (0 1))))
-        ((:establish 1 nil) (((1 2) (2 0) (2 1) (1 9))) (((1 2) (3 3) (2 1) (1 9))))
-        ((:ruff 1 0) (((1 2) (2 0) (3 1) (1 9))) (((1 2) (3 3) (0 5) (1 9))))
+        ((:establish 1 nil) (((1 2) (2 0) (0 5) (1 9))) (((1 2) (0 6) (0 5) (1 9)))
+         (((1 2) (3 3) (0 5) (1 9))))
+        ((:ruff 1 0) (((1 2) (2 0) (3 1) (1 9))) (((1 2) (0 6) (3 1) (1 9)))
+         (((1 2) (3 3) (0 5) (1 9))))
         ((:cash 2 nil) (((2 10) (2 0) (2 12) (2 8))))
         ((:duck 2 nil) (((2 10) (2 0) (2 1) (2 11))) (((2 10) (2 0) (2 1) (2 8)))))
       equal)
@@ -5419,3 +5532,6 @@ W: ♣ A1087 ♦ KQ5 ♥ 762 ♠ Q102"))
 ; tricks (seven in all, as the user found), not six: once in, E exits safely
 ; rather than leading into N's diamonds. N's choices are his, E's E-W's.
 (test (hint-play *exit-hands* 0 nil) 5 eql)
+
+; *guard-hands*: W keeps his ♠ Q guarded, so N-S take six more tricks
+(test (hint-play *guard-hands* 0 nil) 6 eql)
