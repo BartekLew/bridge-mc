@@ -988,10 +988,12 @@
 
 (defun game-hcp (suit) (if (find suit '(C D)) 27 25))
 
-(defun level-bid (partner-min suit len last-bid)
+; Cheapest raise in suit, up to below points short of game: 1, or 3 when a
+; cue-bid shows the hands in between
+(defun level-bid (partner-min suit len last-bid &optional (below 3))
     (let ((bid (jump-bid suit last-bid 0)))
         (if bid (let* ((min-hcp (- (+ 13 (* 3 (first bid))) (or partner-min 0)))
-                       (max-hcp (- (game-hcp suit) (or partner-min 0) 3)))
+                       (max-hcp (- (game-hcp suit) (or partner-min 0) below)))
                    (if (>= max-hcp min-hcp)
                       (cons bid `(and (>= hcp ,min-hcp) (<= hcp ,max-hcp) (>= ,suit ,len))))))))
 
@@ -1046,8 +1048,9 @@
 
         (cond
           ((> partner-len 0)
-           ;; cheapest raise
-           (let ((bid (level-bid partner-min suit (- 8 partner-len) last-bid)))
+           ;; cheapest raise, up to game when there's no cue-bid (below)
+           (let ((bid (level-bid partner-min suit (- 8 partner-len) last-bid
+                                 (if (and last-opp-suit (not our)) 3 1))))
               (if bid (push bid bid-scheme)))
            ;; game in partner's suit
            (push (cons (game-in suit)
@@ -1144,6 +1147,16 @@
                                            '(2 H)
                                            '((2 H))))
       '(3 NT)
+      equal)
+
+;; Partner's cue-bid shows a raise with 11+; a 13-count below game raises
+(test (choose-bid (str2hand "♠ AQ4 ♥ QJ9543 ♦ K3 ♣ J10")
+                  (competitive-further-bid '(and (or (> hcp 11) (< losers 6)) (> losers 4) (< hcp 23)
+                                                 (>= H 5) (< S 5))
+                                           '(and (>= hcp 11) (>= H 3))
+                                           '(3 D)
+                                           '((2 D))))
+      '(3 H)
       equal)
 
 ;; Merge a double with the preceding bid so that last-bid keeps the (level suit) form
@@ -1384,6 +1397,15 @@
                                 (str2hand "S: ♠ AKJ5 ♥ K1064 ♦ Q87 ♣ A6")
                                 (str2hand "W: ♠ 843 ♥ Q982 ♦ 5 ♣ QJ543"))))
       '(nil nil (1 NT) nil (2 C) nil (2 H) nil (2 S) nil (4 S) nil nil nil)
+      equal)
+
+;; Over partner's cue-bid raise the opener doesn't pass
+(test (drain (make-instance 'bidding
+                    :deal (list (str2hand "N: ♠ AQ4 ♥ QJ9543 ♦ K3 ♣ J10")
+                                (str2hand "E: ♠ K1095 ♥  ♦ A9765 ♣ Q952")
+                                (str2hand "S: ♠ J873 ♥ K872 ♦ QJ10 ♣ A8")
+                                (str2hand "W: ♠ 62 ♥ A106 ♦ 842 ♣ K7643"))))
+      '((1 H) (2 D) (3 D) nil (3 H) nil nil nil)
       equal)
 
 ;; Partner answers a takeout double; the doubler shows 18+ with a new suit
