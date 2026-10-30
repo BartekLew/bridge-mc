@@ -192,13 +192,15 @@
 (test (test-bid '(3 H) (str2hand "♣ 85 ♦ 109 ♥ AQJ10932 ♠ 43")) T eq) ; <-- this is fine too
 
 ;; Picks the first matching call from a table based on assess-hand.
-;; Returns the call itself (e.g., '(1 S)) or nil if nothing matches.
+;; Returns the call itself (e.g., '(1 S)) or nil if nothing matches. An
+;; entry with a nil call is a pass its rule chooses (like a penalty pass).
 (defun choose-bid (hand &optional (openings openings))
     "Choose the best bid for a given hand based on a list of possible openings.
     The function evaluates each bid's conditions against the hand's characteristics."
     (let ((measures (assess-hand hand)))
         (car (find-if (lambda-dot (bid meaning)
-                        (if (apply #'good-opening? (cons meaning measures)) bid))
+                        (declare (ignore bid))
+                        (apply #'good-opening? (cons meaning measures)))
                       openings))))
 
 (test (choose-bid (str2hand "♣ KJ9753 ♦ 94 ♥ A84 ♠ A9")) '(1 C) equal)
