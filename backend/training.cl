@@ -70,10 +70,12 @@
                        (suit (second (first rev-bids)))
                        (first-in-suit (fold (lambda (acc bid)
                                                 (if acc acc
-                                                    (if (eq (second (second bid)) suit) (first bid) nil)))
+                                                    (if (and (consp (second bid))
+                                                             (eq (second (second bid)) suit))
+                                                        (first bid) nil)))
                                             nil
                                             (zip-id pbids))))
-                   (+ (* 2 first-in-suit) partnership))))
+                   (mod (+ (* 2 first-in-suit) partnership) 4))))
                    
      (let ((last-bids (skip (reverse bidding))))
         (cond ((not last-bids) nil)
@@ -90,7 +92,11 @@
       3 eq)
 
 (test (who-plays '(nil (1 H) (1 S) (2 H) x nil nil nil)) 1 eq)
-    
+
+(test (who-plays '(nil (1 NT) nil (2 NT) nil (3 C) nil (3 D) nil (3 H) nil nil nil)) 1 eq)
+
+(test (who-plays '((1 S) x nil (2 H) nil nil nil)) 3 eq)
+
 (defun summarized-outcome (label trump outcome hands)
     (format t "~A: ~A~%~A~%" label outcome (apply (curry #'summarize-outcome outcome trump) hands)))
 
