@@ -383,6 +383,13 @@
 ;; - for upper bounds (</<=) pick the lower threshold; if equal, '<' is stricter than '<='
 (defun merge-shapes (a b)
     (labels ((extract-or-hcp-losers (form)
+                (if (some (lambda (x) (and (consp x) (member (first x) '(and or)))) (cdr form))
+                    ;; An or of compound shapes, like a takeout double's: just
+                    ;; the lowest hcp bound all of them have
+                    (let ((mins (mapcar #'min-hcp (cdr form))))
+                        (if (every #'id mins) (list `(>= hcp ,(apply #'min mins)))))
+                    (extract-or-simple form)))
+             (extract-or-simple (form)
                   (let* ((subs (cdr form))
                          (hcp-lb (find-if (lambda (x)
                                             (and (listp x) (= (length x) 3)
@@ -565,6 +572,11 @@
 
 (test (min-hcp '(and (or (>= hcp 18) (< losers 6)) (> c 5)))
       18 eq)
+
+;; A takeout double (12-17 with shape or 18+) shows 12+, not 18+
+(test (merge-shapes nil '(or (and (>= hcp 12) (<= hcp 17) (<= H 2) (>= S 3)) (>= hcp 18)))
+      '(>= hcp 12)
+      equal)
 
 (defun longers (bid-meaning)
     (filter-bid bid-meaning (curry #'match-longer)))
