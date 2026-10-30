@@ -17,12 +17,11 @@
 
 <script setup>
 import { ref, computed, onMounted } from 'vue'
+import PlayAxis from './PlayAxis.vue'
+import { suits, ranks, seats, playDone } from './play.js'
 
-// Suits and ranks
-const suits = ['♠', '♥', '♦', '♣'];
 const suitLetters = { '♠':'S', '♥':'H', '♦':'D', '♣':'C'};
 const suitForVals = { "C":"♣", "D": "♦", "H": "♥", "S":"♠" };
-const ranks = ['A','K','Q','J','10','9','8','7','6','5','4','3','2'];
 const handIds = ['N', 'E', 'S', 'W', ''];
 
 const HandMode = { SELECT: "Select cards", RANDOM: "Random hand" };
@@ -277,12 +276,6 @@ function prevSuit() { suitIndex.value = (suitIndex.value - 1 + suits.length) % s
 const formula = computed(() => edited.value.formula()); 
 
 const simulationReport = ref("");
-// Contracts (axis numbers) of the deal simulation whose play is shown, the
-// others collapsed to their result
-const openAxes = ref({});
-function toggleAxis(axisNo) {
-    openAxes.value[axisNo] = !openAxes.value[axisNo];
-}
 
 async function playSimulation(formulas = hands.value.pushed().map((hand)=>hand.formula())) {
     newMcToken();
@@ -308,9 +301,7 @@ async function playSimulation(formulas = hands.value.pushed().map((hand)=>hand.f
 
     const body = await response.json();
     simulationReport.value = body;
-    openAxes.value = {};
     simId.value = body["ID"];
-    choices.value = null;
     if(body["ID"]) {
         const url = new URL(window.location);
         url.searchParams.delete("play");
@@ -319,7 +310,6 @@ async function playSimulation(formulas = hands.value.pushed().map((hand)=>hand.f
         url.searchParams.set("sim", body["ID"]);
         window.history.replaceState(null, "", url);
     }
-    loadHints();
 }
 
 // URL of a page playing the deal of formulas by engine, in the contracts of
@@ -369,89 +359,11 @@ async function restoreSimulation(id) {
     const saved = await response.json();
     hands.value = Hands.fromFormulas(saved["HANDS"]);
     simulationReport.value = saved["RESULT"];
-    openAxes.value = {};
     simId.value = id;
-    choices.value = null;
-    loadHints();
 }
 
 // Id of the saved simulation shown, which play edits apply to
 const simId = ref(null);
-
-// Tricks offered when the card clicked doesn't take the next trick in a
-// single way: { axis, card, takes, leader, tricks: [{ TRICK, WINNER }...] }; or
-// the variants of a plan: { axis, plan, label, leader,
-// tricks: [{ PLAN, LABEL, TRICKS: [{ TRICK, WINNER, LEADER }...] }...] }
-const choices = ref(null);
-
-function simEditRequest(axisNo, action, extra = {}) {
-    return fetch("api/simedit", {
-                    method: "POST",
-                    headers: {
-                        'Accept': 'application/json',
-                        'Content-Type': 'application/json',
-                    },
-                    body: JSON.stringify({ id: simId.value, axis: axisNo, action: action, ...extra })
-                });
-}
-
-// Plans the side on lead can apply, by contract (axis) not played out:
-// [{ PLAN, LABEL, TRICKS, VARIANTS }...], TRICKS being how many the plan plays
-// (in its longest variant), VARIANTS how many ways it can be played
-const hints = ref({});
-
-async function loadHints() {
-    const power = simulationReport.value && simulationReport.value["POWER"];
-    if(!simId.value || !power) {
-        hints.value = {};
-        return;
-    }
-    const all = {};
-    await Promise.all(power.map(async (axis, axisNo) => {
-        if(playDone(axis)) return;
-        const response = await simEditRequest(axisNo, 'hints');
-        if(response.ok) all[axisNo] = (await response.json())["HINTS"];
-    }));
-    hints.value = all;
-}
-
-// Plan as the backend sends it ({ TYPE, SUIT, SEAT }) to one for a request
-function planRequest(plan) {
-    return { type: plan["TYPE"], suit: plan["SUIT"], seat: plan["SEAT"] };
-}
-
-function applyHint(axisNo, hint) {
-    editPlay(axisNo, 'plan', { plan: planRequest(hint["PLAN"]) });
-}
-
-// Applies an edit (pop, clear, split, play, trick or plan, see sim-edit in
-// rest.cl) to play of contract axisNo of the saved simulation
-async function editPlay(axisNo, action, extra = {}) {
-    const response = await simEditRequest(axisNo, action, extra);
-    if(!response.ok) {
-        const text = await response.text();
-        console.error("Fetch failed:", response.status, response.statusText, text);
-        alert(`Cannot edit play: ${response.status}\n${text}`);
-        return;
-    }
-
-    const body = await response.json();
-    if(body["CHOICES"]) {
-        choices.value = {
-            axis: axisNo,
-            card: extra.card,
-            takes: body["TAKES"],
-            leader: body["LEADER"],
-            plan: extra.plan,
-            label: body["LABEL"],
-            tricks: body["CHOICES"]
-        };
-    } else {
-        simulationReport.value = body["RESULT"];
-        choices.value = null;
-        loadHints();
-    }
-}
 
 onMounted(() => {
     const params = new URLSearchParams(window.location.search);
@@ -464,20 +376,6 @@ onMounted(() => {
         connectMc(params.get("mc"), params.get("measures"));
     }
 });
-
-// Background colour of each suit (with white text), both in played and remaining cards
-const suitColors = { '♠': '#1e3a8a', '♥': '#dc2626', '♦': '#ea580c', '♣': '#15803d' };
-
-const seats = ['N', 'E', 'S', 'W'];
-
-// Hand computed from remaining cards has no proper id; it's always the last one (W)
-function declarerSeat(axis) {
-    return seats.includes(axis['DECLARER']) ? axis['DECLARER'] : 'W';
-}
-
-function emptySeats() {
-    return Object.fromEntries(seats.map((seat) => [seat, []]));
-}
 
 // Whole deal by seat: { N: { '♠': ['A', 'K'...], '♥': ...}, E: ... }. With
 // three hands given, the last one (W) holds the remaining cards.
@@ -493,89 +391,6 @@ const dealHands = computed(() => {
     ]));
     return deal;
 });
-
-// Cards of deal not played in sequences
-function cardsLeft(sequences) {
-    const left = Object.fromEntries(seats.map((seat) => [
-        seat,
-        Object.fromEntries(suits.map((suit) => [suit, [...dealHands.value[seat][suit]]]))
-    ]));
-    for(const seq of sequences) {
-        for(const trick of seq['TRICKS']) {
-            for(const card of trick) {
-                for(const seat of seats) {
-                    left[seat][card[0]] = left[seat][card[0]].filter((rank) => rank !== card.slice(1));
-                }
-            }
-        }
-    }
-    return left;
-}
-
-function playDone(axis) {
-    const left = cardsLeft(axis['SEQUENCES']);
-    return seats.every((seat) => suits.every((suit) => left[seat][suit].length == 0));
-}
-
-function tricksPlayed(axis) {
-    return axis['SEQUENCES'].reduce((sum, seq) => sum + seq['TRICKS'].length, 0);
-}
-
-// Seat to lead after all tricks of axis
-function nextLeader(axis) {
-    var leader = (seats.indexOf(declarerSeat(axis)) + 1) % 4;
-    for(const seq of axis['SEQUENCES']) {
-        for(const winner of seq['WINNERS']) {
-            leader = (leader + winner) % 4;
-        }
-    }
-    return seats[leader];
-}
-
-// Distributes cards of a trick, listed from its leader, to seats:
-// { N: card, E: ..., ...}
-function trickBySeat(trick, leader) {
-    const first = seats.indexOf(leader);
-    return Object.fromEntries(trick.map((card, pos) => [seats[(first + pos) % 4], card]));
-}
-
-// Splits played cards of one contract into sequences of tricks and, within
-// each, distributes them to the hands they come from. First trick is led by
-// declarer's LHO; WINNERS holds position of each trick's winner relative to
-// that trick's leader, who leads the next one. Empty sequences (one just
-// started by the user) are skipped.
-// Returns [{ played:    { N: [{card, trick, lead}...], E: ..., S: ..., W: ... },
-//            remaining: { N: { '♠': ['A', 'K'...], '♥': ...}, E: ... },
-//            comment:   ['line'...] }...]
-// where remaining are cards held before the sequence is played.
-function playSequences(axis) {
-    var leader = (seats.indexOf(declarerSeat(axis)) + 1) % 4;
-    var trickNo = 0;
-    const sequences = axis['SEQUENCES'];
-
-    const played = sequences.map((seq) => {
-        const ans = emptySeats();
-        seq['TRICKS'].forEach((trick, i) => {
-            trick.forEach((card, pos) => {
-                ans[seats[(leader + pos) % 4]].push({
-                    card: card,
-                    trick: trickNo,
-                    lead: pos == 0
-                });
-            });
-            leader = (leader + seq['WINNERS'][i]) % 4;
-            trickNo++;
-        });
-        return ans;
-    });
-
-    return played.map((seq, k) => ({
-                     played: seq,
-                     remaining: cardsLeft(sequences.slice(0, k)),
-                     comment: (sequences[k]['COMMENT'] || '').split('\n').filter(Boolean)
-                 }))
-                 .filter((seq, k) => sequences[k]['TRICKS'].length > 0);
-}
 
 function probabilityPercent(x) {
     return (x*100).toFixed(2) + "%";
@@ -764,7 +579,6 @@ async function connectMc(jid, measureStr = measures.value) {
     measures.value = measureStr || "";
     mcGroup.value = null;
     simId.value = null;
-    choices.value = null;
     mcUrl(jid);
     await pollMc(jid, token, true);
 }
@@ -887,182 +701,14 @@ async function runSimulation() {
       <!-- 2. Deal simulation -->
       <div v-if="simulationReport && simulationReport['POWER']" class="mt-8">
         <!-- SCORE only when one contract of each side was played -->
-        <p v-if="simulationReport['SCORE'] && simulationReport['POWER'].every(playDone)">
+        <p v-if="simulationReport['SCORE']
+                 && simulationReport['POWER'].every((axis) => playDone(dealHands, axis))">
           Probable outcome is {{simulationReport['SCORE'][0]}} vs defence {{simulationReport['SCORE'][1]}}
         </p>
         <div class="flex flex-col gap-2 mt-4">
-          <div v-for="(axis, axisNo) in simulationReport['POWER']">
-            <!-- Contract with its result; a click shows or hides its play -->
-            <button class="w-full text-center text-lg rounded-xl px-3 py-1 bg-gray-100 hover:bg-gray-200"
-                    @click="toggleAxis(axisNo)">
-              <span class="inline-block w-4 text-gray-500">{{ openAxes[axisNo] ? '▾' : '▸' }}</span>
-              <b>{{ axis['TRUMP'] }}</b> by <b>{{ declarerSeat(axis) }}</b>:
-              <template v-if="playDone(axis)">{{ axis['SCORE'] }} tricks</template>
-              <template v-else>
-                {{ axis['SCORE'] }} tricks to declarer of {{ tricksPlayed(axis) }} played
-              </template>
-            </button>
-
-            <template v-if="openAxes[axisNo]">
-
-            <!-- Play split into short sequences of tricks. Each one shows cards
-                 held before it, then table view of the sequence: one row of
-                 played cards per hand, N on top, W and E in the middle, S at the
-                 bottom. Column tells the trick, colour the suit, underlined
-                 card led the trick. Comment on the sequence goes below. -->
-            <div v-for="(seq, k) in playSequences(axis)" :key="k" class="mt-4 border-t pt-4">
-              <div class="flex flex-wrap justify-center items-center gap-x-10 gap-y-2">
-                <!-- Cards held before the sequence -->
-                <div class="grid grid-cols-3 gap-x-4 gap-y-1 items-center">
-                  <template v-for="(seat, cell) in [null, 'N', null, 'W', null, 'E', null, 'S', null]"
-                            :key="cell">
-                    <div v-if="seat" class="font-mono text-sm leading-tight">
-                      <div class="font-bold"
-                           :class="{ 'text-blue-700': seat === declarerSeat(axis) }">{{ seat }}</div>
-                      <div v-for="suit in suits" :key="suit"
-                           class="whitespace-nowrap rounded px-1 mt-0.5 text-white"
-                           :style="{ background: suitColors[suit] }">
-                        {{ suit }} {{ seq.remaining[seat][suit].join('') || '—' }}
-                      </div>
-                    </div>
-                    <div v-else></div>
-                  </template>
-                </div>
-
-                <!-- Tricks of the sequence -->
-                <div class="flex flex-col items-center gap-2">
-                  <div v-for="row in [['N'], ['W', 'E'], ['S']]"
-                       class="flex gap-10">
-                    <div v-for="seat in row" class="flex items-center gap-1">
-                      <span class="w-6 font-bold text-center"
-                            :class="{ 'text-blue-700': seat === declarerSeat(axis) }">
-                        {{ seat }}
-                      </span>
-                      <span v-for="played in seq.played[seat]"
-                            :key="played.card"
-                            :title="`Trick ${played.trick + 1}`"
-                            class="w-9 rounded py-0.5 text-center font-mono text-sm text-white"
-                            :class="{ 'font-bold underline': played.lead }"
-                            :style="{ background: suitColors[played.card[0]] }">
-                        {{ played.card }}
-                      </span>
-                    </div>
-                  </div>
-                </div>
-              </div>
-
-              <!-- w-0 min-w-full: text wraps to the width of cards above
-                   instead of widening the panel -->
-              <div class="w-0 min-w-full text-sm text-center mt-3">
-                <p v-for="line in seq.comment">{{ line }}</p>
-              </div>
-            </div>
-
-            <!-- Play editor: while cards are left, a click on one of them
-                 adds the next trick, taken by that card. When it can't take
-                 it, or can in several ways, the tricks to choose from are
-                 listed instead. -->
-            <div v-if="simId" class="mt-4 border-t pt-4 flex flex-col items-center gap-3">
-              <template v-if="!playDone(axis)">
-                <p class="text-sm text-gray-600">
-                  Click a card to take the next trick; <b>{{ nextLeader(axis) }}</b> leads.
-                  <template v-if="axis['SEQUENCES'].length > 0
-                                  && axis['SEQUENCES'].at(-1)['TRICKS'].length == 0">
-                    Tricks go to a new sequence.
-                  </template>
-                </p>
-
-                <!-- Plans of the side on lead; a click plays all their tricks -->
-                <div v-if="hints[axisNo] && hints[axisNo].length > 0"
-                     class="flex flex-wrap justify-center gap-2">
-                  <button v-for="hint in hints[axisNo]" :key="hint['LABEL']"
-                          class="px-3 py-1 rounded bg-blue-100 hover:bg-blue-200 text-sm"
-                          :title="hint['VARIANTS'] > 1
-                                  ? `Up to ${hint['TRICKS']} trick(s), ${hint['VARIANTS']} variants to choose from`
-                                  : `Plays ${hint['TRICKS']} trick(s)`"
-                          @click="applyHint(axisNo, hint)">
-                    {{ hint['LABEL'] }}
-                    <span class="text-gray-500">({{ hint['TRICKS'] }}<template
-                      v-if="hint['VARIANTS'] > 1">, {{ hint['VARIANTS'] }} variants</template>)</span>
-                  </button>
-                </div>
-                <div class="grid grid-cols-3 gap-x-4 gap-y-1 items-center">
-                  <template v-for="(seat, cell) in [null, 'N', null, 'W', null, 'E', null, 'S', null]"
-                            :key="cell">
-                    <div v-if="seat" class="font-mono text-sm leading-tight">
-                      <div class="font-bold"
-                           :class="{ 'text-blue-700': seat === declarerSeat(axis),
-                                     'underline': seat === nextLeader(axis) }">{{ seat }}</div>
-                      <div v-for="suit in suits" :key="suit"
-                           class="whitespace-nowrap rounded px-1 mt-0.5 text-white"
-                           :style="{ background: suitColors[suit] }">
-                        {{ suit }}
-                        <button v-for="rank in cardsLeft(axis['SEQUENCES'])[seat][suit]"
-                                :key="rank"
-                                class="rounded px-0.5 hover:bg-white hover:text-black"
-                                @click="editPlay(axisNo, 'play', { card: suit + rank })">{{ rank }}</button>
-                        <span v-if="cardsLeft(axis['SEQUENCES'])[seat][suit].length == 0">—</span>
-                      </div>
-                    </div>
-                    <div v-else></div>
-                  </template>
-                </div>
-
-                <!-- Tricks to choose from; cards by seat, winner ringed -->
-                <div v-if="choices && choices.axis === axisNo"
-                     class="flex flex-col items-center gap-2 border rounded p-3">
-                  <p class="text-sm">
-                    <template v-if="choices.label">
-                      {{ choices.label }}: choose a variant:
-                    </template>
-                    <template v-else-if="choices.takes">
-                      {{ choices.card }} can take the trick in several ways:
-                    </template>
-                    <template v-else>
-                      {{ choices.card }} can't take the trick. Choose a trick taken by another card:
-                    </template>
-                  </p>
-                  <!-- A plan variant is a line of tricks with its label, else a single trick -->
-                  <button v-for="(choice, i) in choices.tricks" :key="i"
-                          class="flex flex-col items-start gap-1 rounded px-2 py-1 hover:bg-gray-200"
-                          @click="choice['TRICKS']
-                                  ? editPlay(axisNo, 'trick', { tricks: choice['TRICKS'].map(t => t['TRICK']),
-                                                                plan: planRequest(choice['PLAN']) })
-                                  : editPlay(axisNo, 'trick', { trick: choice['TRICK'], plan: choices.plan })">
-                    <span v-if="choice['LABEL'] && choice['LABEL'] !== choices.label"
-                          class="text-sm font-semibold">{{ choice['LABEL'] }}</span>
-                    <span v-for="(line, j) in (choice['TRICKS']
-                                               || [{ ...choice, LEADER: choices.leader }])"
-                          :key="j" class="flex gap-3">
-                      <span v-for="(card, seat) in trickBySeat(line['TRICK'], line['LEADER'])"
-                            :key="seat" class="flex items-center gap-1">
-                        <span class="font-bold text-sm">{{ seat }}</span>
-                        <span class="w-9 rounded py-0.5 text-center font-mono text-sm text-white"
-                              :class="{ 'underline font-bold': seat === line['LEADER'],
-                                        'ring-2 ring-offset-1 ring-black': card === line['TRICK'][line['WINNER']] }"
-                              :style="{ background: suitColors[card[0]] }">{{ card }}</span>
-                      </span>
-                    </span>
-                  </button>
-                  <button class="text-sm text-gray-600 underline" @click="choices = null">Cancel</button>
-                </div>
-              </template>
-
-              <div class="flex gap-2">
-                <button class="px-3 py-1 rounded bg-gray-200 hover:bg-gray-300 disabled:opacity-50"
-                        :disabled="tricksPlayed(axis) == 0"
-                        @click="editPlay(axisNo, 'pop')">Remove last trick</button>
-                <button class="px-3 py-1 rounded bg-gray-200 hover:bg-gray-300 disabled:opacity-50"
-                        :disabled="tricksPlayed(axis) == 0"
-                        @click="editPlay(axisNo, 'clear')">Remove all tricks</button>
-                <button class="px-3 py-1 rounded bg-gray-200 hover:bg-gray-300 disabled:opacity-50"
-                        :disabled="playDone(axis) || axis['SEQUENCES'].length == 0
-                                   || axis['SEQUENCES'].at(-1)['TRICKS'].length == 0"
-                        @click="editPlay(axisNo, 'split')">New sequence</button>
-              </div>
-            </div>
-            </template>
-          </div>
+          <PlayAxis v-for="(axis, axisNo) in simulationReport['POWER']" :key="`${simId}-${axisNo}`"
+                    :axis="axis" :axis-no="axisNo" :sim-id="simId" :deal="dealHands"
+                    @result="(result) => simulationReport = result" />
         </div>
       </div>
     </div>
