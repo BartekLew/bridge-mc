@@ -1164,6 +1164,137 @@
       '((1 S) (2 H) (2 S) NIL NIL (2 S X))
       equal)
 
+;; Takeout doubles: partner's responses and the doubler's rebid.
+;; Partner must bid when his RHO passes: his best suit the opponents haven't
+;; bid (a four-card major first), jumping with 9-11, NT with a stopper in
+;; their suits, a cue-bid with 12+. He passes only with long strong trumps
+;; (penalty pass). When RHO bids, he may pass and a bid shows 6+ (free bid).
+
+; Suits the opponents haven't bid, majors first
+(defun unbid-suits (opp-suits)
+    (remove-if (lambda (s) (member s opp-suits)) '(S H D C)))
+
+; Rules that suit is the best of suits (it's no shorter than those after it)
+(defun best-suit-rules (suit suits)
+    (loop for s in (cdr (member suit suits)) collect `(>= ,suit ,s)))
+
+(defun stopper-rules (opp-suits)
+    (mapcar (lambda (s) `(>= ,(mksym s "stop") 5)) opp-suits))
+
+; Responses to partner's takeout double, last-bid the last bid made (the
+; doubled one, or RHO's), forced when RHO passed
+(defun takeout-double-responses (last-bid opp-suits forced)
+    (let* ((unbid (unbid-suits opp-suits))
+           (majors (remove-if-not (lambda (s) (member s '(S H))) unbid))
+           (minors (remove-if (lambda (s) (member s majors)) unbid))
+           (no-major (mapcar (lambda (s) `(< ,s 4)) majors))
+           (stoppers (stopper-rules opp-suits))
+           (opp (car (last opp-suits)))
+           (least (if forced 0 6)))
+        (flet ((bid (suit levels) (let ((b (jump-bid suit last-bid levels)))
+                                     (and b (or (not (eq suit 'nt)) (<= (first b) 2)) b))))
+            (remove-if-not (lambda (rule) (or (car rule) (cdr rule)))
+                (append
+                    (if (and forced opp)
+                        `((nil . (and (>= ,opp 5) (>= ,(mksym opp "power") 6) (>= hcp 8)))))
+                    (if (and opp (bid opp 0))
+                        `((,(bid opp 0) . (>= hcp 12))))
+                    (loop for s in majors
+                          when (bid s 1)
+                          collect `(,(bid s 1) . (and (>= hcp 9) (<= hcp 11) (>= ,s 4)
+                                                      ,@(best-suit-rules s majors))))
+                    (if (bid 'nt 1)
+                        `((,(bid 'nt 1) . (and (>= hcp 11) (<= hcp 12) ,@stoppers ,@no-major))))
+                    (loop for s in minors
+                          when (bid s 1)
+                          collect `(,(bid s 1) . (and (>= hcp 9) (<= hcp 11) (>= ,s 5) ,@no-major
+                                                      ,@(best-suit-rules s minors))))
+                    (loop for s in majors
+                          when (bid s 0)
+                          collect `(,(bid s 0) . (and (>= hcp ,least) (>= ,s 4)
+                                                      ,@(best-suit-rules s majors))))
+                    (if (bid 'nt 0)
+                        `((,(bid 'nt 0) . (and (>= hcp ,(max 6 least)) (<= hcp 10) ,@stoppers ,@no-major))))
+                    (loop for s in minors
+                          when (bid s 0)
+                          collect `(,(bid s 0) . (and (>= hcp ,least) (>= ,s 4)
+                                                      ,@(best-suit-rules s minors))))
+                    ;; Forced with no four-card suit: the cheapest three-card one
+                    (if forced
+                        (loop for s in (sort (remove-if-not (lambda (s) (bid s 0)) unbid) #'<
+                                             :key (lambda (s) (+ (* 5 (first (bid s 0))) (suitno s))))
+                              collect `(,(bid s 0) . (>= ,s 3)))))))))
+
+(test (choose-bid (str2hand "♠ KJ1064 ♥ 1076 ♦ J2 ♣ Q95") (takeout-double-responses '(1 H) '(H) t))
+      '(1 S) equal)
+(test (choose-bid (str2hand "♠ KQ64 ♥ 832 ♦ A93 ♣ J72") (takeout-double-responses '(1 H) '(H) t))
+      '(2 S) equal)
+(test (choose-bid (str2hand "♠ KQ64 ♥ 832 ♦ A93 ♣ K72") (takeout-double-responses '(1 H) '(H) t))
+      '(2 H) equal)
+(test (choose-bid (str2hand "♠ 963 ♥ KJ8 ♦ Q742 ♣ J53") (takeout-double-responses '(1 H) '(H) t))
+      '(1 NT) equal)
+(test (choose-bid (str2hand "♠ 963 ♥ 8642 ♦ J742 ♣ 53") (takeout-double-responses '(1 H) '(H) t))
+      '(2 D) equal)
+(test (choose-bid (str2hand "♠ 963 ♥ 8642 ♦ 742 ♣ J53") (takeout-double-responses '(1 H) '(H) t))
+      '(1 S) equal)
+(test (choose-bid (str2hand "♠ 9 ♥ KQJ1095 ♦ A42 ♣ 853") (takeout-double-responses '(1 H) '(H) t))
+      nil equal)
+;; RHO bid: pass with a weak hand
+(test (choose-bid (str2hand "♠ 9632 ♥ 864 ♦ 742 ♣ J53") (takeout-double-responses '(2 H) '(H) nil))
+      nil equal)
+
+; The doubler's rebid after partner's answer (a suit or NT, base the bid he
+; answered over, last-bid the last bid made). A minimum double passes; a raise
+; or game in partner's suit needs four trumps and the points for its level
+; (partner: 4 for a cheapest answer, 10 for a jump); with 18+ a new five-card
+; suit or NT with a stopper (18-19, a jump 20-21).
+(defun doubler-rebids (answer base last-bid opp-suits)
+    (let* ((suit (second answer))
+           (partner (if (> (bid-jump base answer) 0) 10 4))
+           (stoppers (stopper-rules opp-suits)))
+        (flet ((bid (s levels &optional (max-level 7))
+                   (let ((b (jump-bid s last-bid levels)))
+                       (and b (<= (first b) max-level) b))))
+            (remove-if-not #'car
+                (if (eq suit 'nt)
+                    `(((3 NT) . (>= hcp ,(- 25 partner 2)))
+                      (,(bid 'nt 0) . (>= hcp ,(- 23 partner 2))))
+                    (append
+                        (if (bid suit 0)
+                            (loop for level from (first (game-in suit)) downto (first (bid suit 0))
+                                  collect `((,level ,suit) . (and (>= hcp ,(- (+ 13 (* 3 level)) partner))
+                                                                 (>= ,suit 4)))))
+                        (loop for s in (remove suit (unbid-suits opp-suits))
+                              collect `(,(bid s 0) . (and (>= hcp 18) (>= ,s 5))))
+                        `((,(bid 'nt 0 2) . (and (>= hcp 18) (<= hcp 19) ,@stoppers))
+                          (,(bid 'nt 1 3) . (and (>= hcp 20) (<= hcp 21) ,@stoppers)))))))))
+
+(test (choose-bid (str2hand "♠ A85 ♥ A9 ♦ AK754 ♣ A76") (doubler-rebids '(1 S) '(1 H) '(1 S) '(H)))
+      '(2 D) equal)
+(test (choose-bid (str2hand "♠ AJ85 ♥ 9 ♦ KJ75 ♣ A76") (doubler-rebids '(1 S) '(1 H) '(1 S) '(H)))
+      nil equal)
+(test (choose-bid (str2hand "♠ AK85 ♥ 9 ♦ AK75 ♣ Q76") (doubler-rebids '(1 S) '(1 H) '(1 S) '(H)))
+      '(2 S) equal)
+(test (choose-bid (str2hand "♠ AQ85 ♥ A9 ♦ AQ75 ♣ K76") (doubler-rebids '(2 S) '(1 H) '(2 S) '(H)))
+      '(4 S) equal)
+
+; Scheme of a takeout double's partner, or of the doubler after partner
+; answered, from bids (from the dealer); else nil
+(defun takeout-double-scheme (bids)
+    (let* ((n (length bids))
+           (ours (loop for i from (- n 2) downto 0 by 2 collect (nth i bids)))   ; partner's latest first
+           (theirs (loop for i from (- n 1) downto 0 by 2 collect (nth i bids))) ; RHO's latest first
+           (our-calls (remove nil ours))
+           (opp-suits (remove 'nt (remove-duplicates (mapcar #'second (remove-if-not #'consp (reverse theirs))))))
+           (last-bid (find-if #'consp (reverse bids))))
+        (cond ((and (equal our-calls '(x)) (eq (first ours) 'x) last-bid)
+                 (takeout-double-responses last-bid opp-suits (null (first theirs))))
+              ((and (= (length our-calls) 2) (consp (first ours)) (eq (second our-calls) 'x)
+                    (oddp (position 'x ours))
+                    (not (member (second (first ours)) opp-suits)))
+                 (doubler-rebids (first ours) (find-if #'consp (reverse (subseq bids 0 (- n 2))))
+                                 last-bid opp-suits)))))
+
 ;; Bidding scheme selection based on bidding sequence (history-aware).
 (defun bidding-scheme-for (bids meanings)
     (let* ((merged-bids (merge-double bids))
@@ -1171,7 +1302,9 @@
                             collect (nth i merged-bids)))
            (our-bids (loop for i from (- (length merged-bids) 2) downto 0 by 2
                             collect (nth i merged-bids))))
-      (if (some #'identity opps-bids)
+      (cond
+        ((takeout-double-scheme bids))
+        ((some #'identity opps-bids)
           ;; competitive first overcall case
           (let ((opp-bids (remove nil (loop for i from (- (length merged-bids) 1) downto 0 by 2
                                                   collect (nth i merged-bids))))
@@ -1179,8 +1312,9 @@
             (cond ((and (not (filter #'identity our-bids)) (<= (length our-bids) 3))
                      (simple-overcall last-bid opp-bids))
                   ((filter #'identity our-bids)
-                    (competitive-further-bid (first meanings) (third meanings) last-bid opp-bids))))
-          ;; Our one sided bidding case:
+                    (competitive-further-bid (first meanings) (third meanings) last-bid opp-bids)))))
+        ;; Our one sided bidding case:
+        (t
           (let ((active-bids (remove nil merged-bids))
                 (our (nth 0 meanings))
                 (partner (nth 2 meanings)))
@@ -1194,7 +1328,7 @@
                       (stayman-responses 1))
                   ((equal active-bids '((2 NT) (2 C)))
                       (stayman-responses 2))
-                  (t (further-bid our partner (car (last active-bids)))))))))
+                  (t (further-bid our partner (car (last active-bids))))))))))
 
 ;; Simple bidding state machine (bot vs. empty seats).
 ;; - deal: four hands (N,E,S,W)
@@ -1249,7 +1383,16 @@
                                 (str2hand "E: ♠ 62 ♥ AJ75 ♦ A942 ♣ 987")
                                 (str2hand "S: ♠ AKJ5 ♥ K1064 ♦ Q87 ♣ A6")
                                 (str2hand "W: ♠ 843 ♥ Q982 ♦ 5 ♣ QJ543"))))
-      '(nil nil (1 NT) nil (2 C) nil (2 H) nil (2 S) nil (4 S) nil nil nil) 
+      '(nil nil (1 NT) nil (2 C) nil (2 H) nil (2 S) nil (4 S) nil nil nil)
+      equal)
+
+;; Partner answers a takeout double; the doubler shows 18+ with a new suit
+(test (drain (make-instance 'bidding
+                    :deal (list (str2hand "N: ♠ Q9732 ♥ 53 ♦ 10983 ♣ 32")
+                                (str2hand "E: ♠ KJ1064 ♥ 1076 ♦ J2 ♣ Q95")
+                                (str2hand "S: ♠  ♥ KQJ842 ♦ Q6 ♣ KJ1084")
+                                (str2hand "W: ♠ A85 ♥ A9 ♦ AK754 ♣ A76"))))
+      '(nil nil (1 H) x nil (1 S) nil (2 D) nil (2 S) nil (3 S) nil (4 S) nil nil nil)
       equal)
 
 (test (drain (make-instance 'bidding
