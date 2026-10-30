@@ -4748,11 +4748,24 @@ W: ♣ A1087 ♦ KQ5 ♥ 762 ♠ Q102"))
                                                 (= (trick-winner (subseq alt 0 (+ i 1)) trump) i))))
                                    (list alt)))))))
 
+; Ranks (ascending) grouped into runs of equivalent cards: no card of others
+; ranks between two of a run
+(defun rank-groups (ranks others)
+    (let ((groups nil))
+        (dolist (r ranks (reverse (mapcar #'reverse groups)))
+            (if (and groups (notany (lambda (o) (< (first (first groups)) o r)) others))
+                (push r (first groups))
+                (push (list r) groups)))))
+
+(test (rank-groups '(0 2 10 12) '(5 6 9 11 4 8 3 7)) '((0 2) (10) (12)) equal)
+
 ; Tricks of solved plan like trick, its main one, in which an opponent
-; following suit after a card of the side ducks instead of beating it, or
-; the other way round (his lowest card). Cards played before him
-; stay, the side's later ones follow the suit solver. Unless any, only
-; ones in which another hand takes the trick.
+; following suit after a card of the side, able to beat it, plays another
+; card than there: his lowest card, ducking, or the lowest of each run of
+; his cards beating it that no other card, played in this trick or not,
+; splits (rank-groups), so covering or rising with a high card. Cards
+; played before him stay, the side's later ones follow the suit solver.
+; Unless any, only ones in which another hand takes the trick.
 (defun duck-variants (hands leader trump plan trick &optional (any t))
     (let ((side (mod leader 2))
           (suit (plan-suit plan trump))
@@ -4765,19 +4778,28 @@ W: ♣ A1087 ♦ KQ5 ♥ 762 ♠ Q102"))
                   for beat = (and (/= (mod s 2) side) ranks (eql (first before) suit)
                                   (= (mod (nth (trick-winner (subseq trick 0 i) trump) seats) 2) side)
                                   (find-if (lambda (r) (> r (second before))) ranks))
-                  for card = (and beat
-                                  (if (and (eql (first (nth i trick)) suit) (> (second (nth i trick)) (second before)))
-                                      (find-if (lambda (r) (< r (second before))) ranks)
-                                      beat))
-                  for alt = (and card
-                                 (let* ((moves (nth-value 1 (solve-suit hands side suit trump leader mode ruffs
-                                                                        (append (trick-forced trick leader suit trump i)
-                                                                                (list (cons s (cons 0 card)))
-                                                                                (plan-forced hands leader plan))))))
-                                     (and moves (moves-trick hands leader trump suit moves))))
-                  when (and alt (not (equal alt trick))
-                            (or any (/= (trick-taker alt leader trump) (trick-taker trick leader trump))))
-                  collect alt))))
+                  for played = (and (eql (first (nth i trick)) suit) (second (nth i trick)))
+                  for cards = (and beat
+                                   (let ((others (loop for s2 in seats
+                                                       unless (= s2 s)
+                                                       append (nth suit (nth s2 hands))))
+                                         (low (first ranks)))
+                                       (append (and (< low (second before))
+                                                    (not (and played (< played (second before))))
+                                                    (list low))
+                                               (loop for group in (rank-groups ranks others)
+                                                     when (and (> (first group) (second before))
+                                                               (not (member played group)))
+                                                       collect (first group)))))
+                  append (loop for card in cards
+                               for alt = (let ((moves (nth-value 1 (solve-suit hands side suit trump leader mode ruffs
+                                                                               (append (trick-forced trick leader suit trump i)
+                                                                                       (list (cons s (cons 0 card)))
+                                                                                       (plan-forced hands leader plan))))))
+                                             (and moves (moves-trick hands leader trump suit moves)))
+                               when (and alt (not (equal alt trick))
+                                         (or any (/= (trick-taker alt leader trump) (trick-taker trick leader trump))))
+                                 collect alt)))))
 
 ; Is it worth making seat, an opponent of leader, ruff? When his trumps are
 ; at least as many as the longest ones of leader's side, so they need
@@ -5175,9 +5197,9 @@ W: ♣ A1087 ♦ KQ5 ♥ 762 ♠ Q102"))
         (reverse ans)))
 
 ; E's clubs, cashed ending in E or in W, each with S covering the first
-; card as a variant
+; card with the 4 or the Q as variants
 (test (mapcar #'first (plan-variants *lead-hands* 1 2 '(:cash 0 nil)))
-      '((:cash 0 1) (:cash 0 1) (:cash 0 3) (:cash 0 3))
+      '((:cash 0 1) (:cash 0 1) (:cash 0 1) (:cash 0 3) (:cash 0 3) (:cash 0 3))
       equal)
 
 ; Plans for the side on lead with their variants, as a list of (plan
@@ -5212,6 +5234,22 @@ W: ♣ A1087 ♦ KQ5 ♥ 762 ♠ Q102"))
                       when variants do (add variants)))
             (profiled ("prune") (prune-hints (reverse ans) hands leader trump)))))
 
+; ♣ trumps, S on lead
+; N ♠ KJ87 ♥ 1054 ♦ 82 ♣ J5
+; E ♠ 106 ♦ A5 ♣ K1098642
+; S ♠ 953 ♥ 76 ♦ Q10974 ♣ Q
+; W ♠ AQ42 ♦ KJ63 ♣ A73
+; S establishing spades, W ducks, beats the 3 with the 4 (N's jack taking
+; it), plays the queen or rises with the ace
+(defparameter *rise-hands*
+    '(((3 9) (0 6) (2 3 8) (5 6 9 11)) ((0 2 4 6 7 8 11) (3 12) nil (4 8))
+      ((10) (2 5 7 8 10) (4 5) (1 3 7)) ((1 5 12) (1 4 9 11) nil (0 2 10 12))))
+(test (sort (remove-duplicates
+             (mapcar (lambda (v) (second (nth 1 (first (second v)))))
+                     (second (assoc '(:establish 3 nil) (plan-hints *rise-hands* 2 0) :test #'equal))))
+            #'<)
+      '(0 2 10 12) equal)
+
 ; Key of plan for profiling: a plan played in one suit by the suit solver
 ; depends mostly on that suit and trumps, others on the whole position
 (defun plan-profile-key (hands leader trump plan)
@@ -5224,12 +5262,13 @@ W: ♣ A1087 ♦ KQ5 ♥ 762 ♠ Q102"))
 ; trumps, so leading it doesn't establish it but forces E (his four trumps
 ; need drawing), E and W choosing whether to ruff, N overruffing W. N
 ; ruffing it high would gain no trump trick. In hearts E may also duck S's
-; 8. Drawing all trumps and ducking diamonds are plays of their own. Not
-; ruffing, W discards a heart, keeping his long fourth diamond.
+; 8 or rise with the A. Drawing all trumps and ducking diamonds are plays
+; of their own. Not ruffing, W discards a heart, keeping his long fourth
+; diamond.
 (test (mapcar (lambda (h) (cons (first h) (mapcar #'first (second h)))) (plan-hints *force-hands* 2 3))
       '(((:draw 3 nil) (:draw 3 nil)) ((:draw-all 3 nil) (:draw-all 3 nil))
         ((:cash 1 nil) (:cash 1 nil)) ((:duck 1 nil) (:duck 1 nil))
-        ((:establish 2 nil) (:establish 2 nil) (:establish 2 nil))
+        ((:establish 2 nil) (:establish 2 nil) (:establish 2 nil) (:establish 2 nil))
         ((:force 0 1) (:force 0 1) (:force 0 1) (:force 0 1)))
       equal)
 (test (nth-value 1 (plan-tricks *force-hands* 2 3 '(:establish 0 nil)))
@@ -5257,13 +5296,13 @@ W: ♣ A1087 ♦ KQ5 ♥ 762 ♠ Q102"))
 ; Drawing trumps; drawing all of them lets E's K take the Q rather than
 ; crashing the A (or ducks, the Q taking), which is exiting with a heart
 ; too; the club ruff, sure only with the A, gains nothing; a spade exits,
-; W covering N's 3 or not.
+; W covering N's 3 or not, E playing the 10 or the K.
 (test (mapcar (lambda (h) (cons (first h) (mapcar #'first (second h))))
               (plan-hints '((nil (11) (1 4 5 6 9 12) (1 2)) (nil (5 7 10) (8 11) (8 9 11 12))
                             ((10) (1 2 4 6) (10) (4 7 10)) (nil (3) (0 2 3 7) (0 3 5 6)))
                           2 2))
       '(((:draw 2 nil) (:draw 2 nil)) ((:draw-all 2 nil) (:draw-all 2 nil) (:draw-all 2 nil))
-        ((:cash 1 nil) (:cash 1 nil)) ((:exit 3 nil) (:exit 3 nil) (:exit 3 nil)))
+        ((:cash 1 nil) (:cash 1 nil)) ((:exit 3 nil) (:exit 3 nil) (:exit 3 nil) (:exit 3 nil)))
       equal)
 (test (plan-tricks '((nil (11) (1 4 5 6 9 12) (1 2)) (nil (5 7 10) (8 11) (8 9 11 12))
                      ((10) (1 2 4 6) (10) (4 7 10)) (nil (3) (0 2 3 7) (0 3 5 6)))
@@ -5289,11 +5328,13 @@ W: ♣ A1087 ♦ KQ5 ♥ 762 ♠ Q102"))
 ; establishes diamonds or clubs, cashes ♥ Q or ducks it, E taking it with
 ; the K or not (no hint failed on the ruff). Establishing diamonds, N
 ; discards a club, keeping his six hearts; W discards the ♥ 2 or the ♣ 8.
+; Establishing clubs, W may cover the 2 with the J or the A.
 (test (mapcar (lambda (h) (cons (first h) (mapcar #'second (second h))))
               (plan-hints '(((5 7 8) nil (1 4 5 6 9 12) (1 2)) ((1 4 11) (9 10) (8 11) (8 9 11 12))
                             ((0 2 3 10) (2 4 6) (10) (4 7 10)) ((6 9 12) nil (0 2 3 7) (0 3 5 6)))
                           2 3))
-      '(((:establish 0 nil) (((0 0) (0 6) (0 5) (0 1))))
+      '(((:establish 0 nil) (((0 0) (0 6) (0 5) (0 1))) (((0 0) (0 9) (0 5) (0 1)))
+         (((0 0) (0 12) (0 5) (0 1))))
         ((:establish 1 nil) (((1 2) (2 0) (0 5) (1 9))) (((1 2) (0 6) (0 5) (1 9)))
          (((1 2) (3 3) (0 5) (1 9))))
         ((:ruff 1 0) (((1 2) (2 0) (3 1) (1 9))) (((1 2) (0 6) (3 1) (1 9)))
@@ -5314,7 +5355,7 @@ W: ♣ A1087 ♦ KQ5 ♥ 762 ♠ Q102"))
 ; longer than W's 3. Crossing to E is that ruff, so it's left out. Voiding
 ; spades in E, the J ruffed by S, is establishing them, the K ruffed (S
 ; may also discard, E's Q taking), so it's left out too. W may also exit
-; with his trump.
+; with his trump, N and S playing low or high over it.
 (defparameter *uppercut-hands*
     '(((1 2 4 10) (7) (2 7 12) (4)) ((0 3 5 6 8 11) nil (6 10) (10))
       ((12) (10) (0 3 4 5 8 9 11) nil) ((7 9) (5 8 9) (1) (9 11 12))))
@@ -5322,7 +5363,7 @@ W: ♣ A1087 ♦ KQ5 ♥ 762 ♠ Q102"))
 (test (mapcar (lambda (h) (cons (first h) (mapcar #'first (second h)))) (plan-hints *uppercut-hands* 3 2))
       '(((:establish 1 nil) (:establish 1 nil)) ((:ruff 1 1) (:ruff 1 1))
         ((:establish 3 nil) (:establish 3 nil) (:establish 3 nil))
-        ((:exit 2 nil) (:exit 2 nil) (:exit 2 nil)))
+        ((:exit 2 nil) (:exit 2 nil) (:exit 2 nil) (:exit 2 nil) (:exit 2 nil) (:exit 2 nil)))
       equal)
 (test (second (find '(:ruff 1 1) (plan-hints *uppercut-hands* 3 2) :key #'first :test #'equal))
       '(((:ruff 1 1) (((1 5) (1 7) (2 6) (1 10)))))
@@ -5654,10 +5695,11 @@ W: ♣ A1087 ♦ KQ5 ♥ 762 ♠ Q102"))
       6
       eql)
 
-; *exit-hands*, NT, N on lead after E ducked the ♥ J: N-S take five more
-; tricks (seven in all, as the user found), not six: once in, E exits safely
-; rather than leading into N's diamonds. N's choices are his, E's E-W's.
-(test (hint-play *exit-hands* 0 nil) 5 eql)
+; *exit-hands*, NT, N on lead after E ducked the ♥ J: N-S took five more
+; tricks (seven in all, as the user found) while E had to cover N's ♦ 3
+; exit with the K. Ducking it with the 4, S's J taking, E-W hold them to
+; four, N then baring his ♦ Q on S's ♣ K (the side's discards don't vary).
+(test (hint-play *exit-hands* 0 nil) 4 eql)
 
 ; *guard-hands*: W keeps his ♠ Q guarded, so N-S take six more tricks
 (test (hint-play *guard-hands* 0 nil) 6 eql)
