@@ -16,7 +16,8 @@
 ; One compilation unit, so calls to functions defined further on don't warn
 (with-compilation-unit ()
     (load "bridge.cl")
-    (load "compscore.cl"))
+    (load "compscore.cl")
+    (load "training.cl"))
 (ql:quickload '(:clack :clack-cors :jonathan :flexi-streams))
 
 (defclass table ()
@@ -174,8 +175,8 @@
 
 (defparameter *sims-dir* (merge-pathnames "sims/" (uiop:getcwd)))
 
-(defun sim-path (id)
-    (merge-pathnames (format nil "~A.json" id) *sims-dir*))
+(defun sim-path (id &optional (dir *sims-dir*))
+    (merge-pathnames (format nil "~A.json" id) dir))
 
 (defun valid-sim-id? (id)
     (and (> (length id) 0)
@@ -184,10 +185,10 @@
 (defun new-sim-id ()
     (format nil "~(~36R~36R~)" (get-universal-time) (random (expt 36 3))))
 
-(defun write-sim (id sim)
-    (ensure-directories-exist *sims-dir*)
-    (with-open-file (out (sim-path id) :direction :output :if-exists :supersede
-                                       :external-format :utf-8)
+(defun write-sim (id sim &optional (dir *sims-dir*))
+    (ensure-directories-exist dir)
+    (with-open-file (out (sim-path id dir) :direction :output :if-exists :supersede
+                                           :external-format :utf-8)
         (write-string (jonathan:to-json sim) out)))
 
 (defun save-sim (hands result)
@@ -195,9 +196,9 @@
         (write-sim id `(:hands ,hands :result ,result))
         id))
 
-(defun load-sim (id)
+(defun load-sim (id &optional (dir *sims-dir*))
     (if (valid-sim-id? id)
-        (with-open-file (in (sim-path id) :if-does-not-exist nil :external-format :utf-8)
+        (with-open-file (in (sim-path id dir) :if-does-not-exist nil :external-format :utf-8)
             (if in (let ((str (make-string (file-length in))))
                       (subseq str 0 (read-sequence str in)))))))
 
@@ -642,6 +643,182 @@
                          collect (list (str2suitno (getf axis :|TRUMP|)) (declarer-seat axis)))
                    :save (and save (new-sim-id)) :timeout timeout)))
 
+;; Play training (training.cl): a random deal bid by the computer, played
+;; by the user from S (and N when declaring) against the computer. Games in
+;; progress are saved to training/<id>.json, out of reach of GET
+;; /api/simdeal, as they hold the hidden hands. A finished one becomes sim
+;; <id> with the user's play, play-deal's and, when the hint search is done,
+;; the hint line (PENDING till then).
+
+(defparameter *training-dir* (merge-pathnames "training/" (uiop:getcwd)))
+(defparameter *training-roles* '("declarer" "leader" "partner" "defender"))
+(defparameter *training-hint-timeout* 60)
+
+; Sim files are written by edits and the hint search thread; searches take
+; turns, as they share caches
+(defvar *sim-lock* (sb-thread:make-mutex :name "sim files"))
+(defvar *hint-lock* (sb-thread:make-mutex :name "hint search"))
+
+(defun call-str (call)
+    (cond ((null call) "Pass")
+          ((eq call 'x) "X")
+          ((eq call 'xx) "XX")
+          (t (format nil "~A~A" (first call) (suitstr (normsuit (second call)))))))
+
+; Formula of seat's hand as the frontend makes it: N: ♠ AK9 ♥  ♦ A8 ♣ KJ96
+(defun hand-formula (hands seat)
+    (format nil "~A: ~{~A~^ ~}" (nth seat *seats*)
+            (loop for suit from 3 downto 0
+                  collect (format nil "~A ~A" (suitstr suit) (ranks-str (nth suit (nth seat hands)))))))
+
+; Cards of a hand, spades first, high ones first
+(defun hand-cards (suits)
+    (loop for s from 3 downto 0
+          append (mapcar (lambda (r) (cardstr (list s r))) (reverse (nth s suits)))))
+
+(defun load-training (id)
+    (let ((str (load-sim id *training-dir*)))
+        (and str (jonathan:parse str))))
+
+; Game as saved: (hands declarer trump mine cards)
+(defun training-game (game)
+    (let ((contract (getf game :contract)))
+        (list (sim-hands (getf game :hands))
+              (position (getf contract :declarer) *seats* :test #'equal)
+              (str2suitno (getf contract :trump))
+              (training-seats (if (equal (getf game :role) "declarer") :declarer :defender))
+              (mapcar #'str2card (getf game :cards)))))
+
+; What the player sees of game id: auction and contract, the hands of his
+; seats and dummy's once the opening lead is made (all at the end), tricks
+; done and the one going on, the seat to play next and tricks taken by
+; declarer's side and by the defence. A finished game has the deal and the
+; id of its sim.
+(defun training-view (id game)
+    (destructuring-bind (hands declarer trump mine cards) (training-game game)
+        (multiple-value-bind (left done trick leader) (training-position hands declarer trump cards)
+            (let ((over (= (length cards) 52))
+                  (taken (count-if (lambda (d) (evenp (- (third d) declarer))) done)))
+                `(:id ,id
+                  :role ,(getf game :role)
+                  :dealer ,(getf game :dealer)
+                  :auction ,(getf game :auction)
+                  :contract ,(getf game :contract)
+                  :mine ,(mapcar (lambda (s) (nth s *seats*)) mine)
+                  :hands ,(loop for seat from 0 below 4
+                                append (list (intern (nth seat *seats*) :keyword)
+                                             (if (or over (member seat mine)
+                                                     (and cards (= seat (mod (+ declarer 2) 4))))
+                                                 (hand-cards (nth seat left))
+                                                 :null)))
+                  :counts ,(loop for seat from 0 below 4
+                                 append (list (intern (nth seat *seats*) :keyword)
+                                              (length (apply #'append (nth seat left)))))
+                  :tricks ,(loop for (tr l w) in done
+                                 collect `(:cards ,(mapcar #'cardstr tr)
+                                           :leader ,(nth l *seats*)
+                                           :winner ,(nth w *seats*)))
+                  :trick (:cards ,(mapcar #'cardstr trick) :leader ,(nth leader *seats*))
+                  :next ,(if over :null (nth (mod (+ leader (length trick)) 4) *seats*))
+                  :taken (,taken ,(- (length done) taken))
+                  ,@(and over `(:deal ,(getf game :hands) :sim ,(getf game :sim))))))))
+
+; Axis of a training sim with the play of outcome, hands from declarer's
+(defun training-axis (label outcome trump declarer hands tricks)
+    `(:label ,label
+      :trump ,(suitstr trump)
+      :declarer ,(nth declarer *seats*)
+      :score ,tricks
+      :sequences ,(play-sequences outcome trump hands)))
+
+; Plays the contract (trump declarer) of the deal of formulas by hints in a
+; thread, adding the line to the axes of sim id when done
+(defun training-hints (id formulas trump declarer)
+    (sb-thread:make-thread
+        (lambda ()
+            (let ((axis (handler-case
+                            (sb-thread:with-mutex (*hint-lock*)
+                                (let ((*standard-output* (make-broadcast-stream)))
+                                    (first (getf (nth-value 1 (hint-deal-1 formulas (list (list trump declarer))
+                                                                           nil *training-hint-timeout*))
+                                                 :power))))
+                          (error (e) (format t "~&[ERROR] hint search of ~A: ~A~%" id e) nil))))
+                (sb-thread:with-mutex (*sim-lock*)
+                    (let* ((sim (jonathan:parse (load-sim id)))
+                           (result (getf sim :result)))
+                        (remf result :pending)
+                        (if axis
+                            (setf (getf result :power)
+                                  (append (getf result :power) (list `(:label "Hint search" ,@axis)))))
+                        (setf (getf sim :result) result)
+                        (write-sim id sim)))))
+        :name "training hints"))
+
+; Sim of a finished game: the player's play (edited), play-deal's, and the
+; hint search's to come
+(defun training-sim (game hands declarer trump cards)
+    (let* ((objs (roll (- declarer) (mapcar (lambda (s) (make-instance 'hand := (mapcar #'copy-list s)))
+                                            hands)))
+           (computer (apply #'play-deal (suitsym trump) objs))
+           (done (nth-value 1 (training-position hands declarer trump cards)))
+           (id (save-sim (getf game :hands)
+                         `(:pending t
+                           :power ((:edited t
+                                    ,@(training-axis "Your play" (training-outcome hands declarer trump cards)
+                                                     trump declarer objs
+                                                     (count-if (lambda (d) (evenp (- (third d) declarer)))
+                                                               done)))
+                                   ,(training-axis "Computer" computer trump declarer objs
+                                                   (second (score computer))))))))
+        (training-hints id (getf game :hands) trump declarer)
+        id))
+
+; Game id with cards played, then the computer's till the player is to play
+; again; saved, and made a sim when finished. Returns training-view.
+(defun training-advance (id game cards)
+    (destructuring-bind (hands declarer trump mine played) (training-game game)
+        (declare (ignore played))
+        (let ((cards (computer-plays hands declarer trump cards mine)))
+            (setf (getf game :cards) (mapcar #'cardstr cards))
+            (if (= (length cards) 52)
+                (setf (getf game :sim) (training-sim game hands declarer trump cards)))
+            (write-sim id game *training-dir*)
+            (training-view id game))))
+
+; New game of the player in role (see *training-roles*)
+(defun training-new (role)
+    (if (not (member role *training-roles* :test #'equal))
+        (edit-error "Bad role ~A" role))
+    (destructuring-bind (hands dealer bids (level trump declarer doubled))
+            (training-deal (intern (string-upcase role) :keyword))
+        (training-advance (new-sim-id)
+                          `(:hands ,(loop for seat from 0 below 4 collect (hand-formula hands seat))
+                            :role ,role
+                            :dealer ,(nth dealer *seats*)
+                            :auction ,(mapcar #'call-str bids)
+                            :contract (:level ,level
+                                       :trump ,(suitstr trump)
+                                       :declarer ,(nth declarer *seats*)
+                                       :doubled ,(if doubled (call-str doubled) ""))
+                            :cards nil)
+                          nil)))
+
+; Card played by the player in game id
+(defun training-play (id card)
+    (let ((game (or (load-training id) (edit-error "No game ~A" id))))
+        (destructuring-bind (hands declarer trump mine cards) (training-game game)
+            (if (= (length cards) 52) (edit-error "All cards are played"))
+            (multiple-value-bind (left done trick leader) (training-position hands declarer trump cards)
+                (declare (ignore done))
+                (let ((c (or (str2card card) (edit-error "Bad card ~A" card)))
+                      (seat (mod (+ leader (length trick)) 4)))
+                    (if (not (member seat mine))
+                        (edit-error "~A is to play" (nth seat *seats*)))
+                    (if (not (member c (legal-cards (nth seat left) (and trick (first (first trick))))
+                                     :test #'equal))
+                        (edit-error "~A can't be played now" card))
+                    (training-advance id game (append cards (list c))))))))
+
 ;; Test deals for play by hints, saved as sims/hinttest-NN.json
 ; A scenario is (name count defs check contract): defs of the hands N E S
 ; as the generator of mc-deal takes them (W gets the rest), check a test of
@@ -1042,6 +1219,13 @@
     `(,retcode (:content-type "application-json")
       (,(jonathan:to-json response))))
 
+; Response of function called with the request body parsed, edit errors
+; given as 400
+(defun edit-endpoint (env function)
+    (let ((request (jonathan:parse (read-body env))))
+        (handler-case (json-response 200 (funcall function request))
+            (edit-error (e) (json-response 400 `(:error ,(princ-to-string e)))))))
+
 (defun app (env)
   (let ((path (getf env :path-info)))
     (cond
@@ -1066,12 +1250,22 @@
                                                      (curry #'fold #'combine (make-instance 'result)))
                                                  nil nil #'contracts-parser)))
       ((string= path "/api/simedit")
-       (let ((request (jonathan:parse (read-body env))))
-          (handler-case (json-response 200 (sim-edit (getf request :|id|) (getf request :|axis|)
-                                                     (getf request :|action|) (getf request :|card|)
-                                                     (getf request :|trick|) (getf request :|plan|)
-                                                     (getf request :|tricks|)))
-            (edit-error (e) (json-response 400 `(:error ,(princ-to-string e)))))))
+       (edit-endpoint env (lambda (request)
+                             (sb-thread:with-mutex (*sim-lock*)
+                                (sim-edit (getf request :|id|) (getf request :|axis|)
+                                          (getf request :|action|) (getf request :|card|)
+                                          (getf request :|trick|) (getf request :|plan|)
+                                          (getf request :|tricks|))))))
+      ((string= path "/api/train")
+       (edit-endpoint env (lambda (request) (training-new (getf request :|role|)))))
+      ((and (substr= "/api/train/" path) (search "/play" path))
+       (let ((id (subseq path (length "/api/train/") (search "/play" path))))
+          (edit-endpoint env (lambda (request) (training-play id (getf request :|card|))))))
+      ((substr= "/api/train/" path)
+       (let* ((id (subseq path (length "/api/train/")))
+              (game (load-training id)))
+          (if game (json-response 200 (training-view id game))
+                   (json-response 404 `(:status :not-found)))))
       ((substr= "/api/simdeal/" path)
        (let ((saved (load-sim (subseq path (length "/api/simdeal/")))))
           (if saved `(200 (:content-type "application/json") (,saved))
