@@ -1727,7 +1727,7 @@
                             (cons (position h '(#\2 #\3 #\4 #\5 #\6 #\7 #\8 #\9 #\1 #\J #\Q #\K #\A)) acc)))))))
 
 (defun str2hand (str)
-    (labels ((suits (fields &optional (acc '(nil nil nil nil)))
+    (labels ((suits (fields &optional (acc (list nil nil nil nil)))
                 (cond ((not fields) acc)
                       ((str2suitno (second fields)) 
                             (setf (nth (str2suitno (first fields)) acc) nil)
@@ -1743,6 +1743,12 @@
          
 (test (suits (str2hand "N: ♣ KJ96 ♦ A8 ♥ AJ83 ♠ AK9"))
       '((4 7 9 11) (6 12) (1 6 9 12) (7 11 12))
+      equal)
+
+; A suit left out is void, whatever hands were read before
+(test (progn (str2hand "N: ♠ AK9 ♥ AJ83 ♦ A8 ♣ KJ96")
+             (suits (str2hand "E: ♠ J73 ♥ AQJ94 ♣ 86543")))
+      '((1 2 3 4 6) nil (2 7 9 10 12) (1 5 9))
       equal)
 
 (test (handid (str2hand "N: ♣ KJ96 ♦ A8 ♥ AJ83 ♠ AK9"))
