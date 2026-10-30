@@ -369,7 +369,7 @@
 (defun match-longer (lst)
     (let ((ans (or (matchlist '(> _ _) (lambda (suit len) (list suit (+ len 1))) lst)
                    (matchlist '(>= _ _) #'id* lst))))
-       (if (find (first ans) '(C D H S))
+       (if (and (find (first ans) '(C D H S)) (numberp (second ans)))
            ans)))
         
 ;; Combine non-nil conditions into (and ...); collapse to a single element when possible.
@@ -435,7 +435,7 @@
                                               x))))))))))
         (let ((lowers nil) (uppers nil) (others nil) (order nil))
             (dolist (cl (append (clauses a) (clauses b)))
-                (if (and (listp cl) (= (length cl) 3) (symbolp (first cl)))
+                (if (and (listp cl) (= (length cl) 3) (symbolp (first cl)) (numberp (third cl)))
                     (let ((op (first cl)) (var (second cl)) (val (third cl)))
                         (declare (ignore val))
                         (cond ((lower-op? op)
@@ -489,6 +489,12 @@
 (test (merge-shapes '(and (>= hcp 12))
                     '(and (> hcp 12) (<= S 5)))
       '(and (> hcp 12) (<= S 5))
+      equal)
+
+;; Comparisons of two suits aren't bounds; they are kept as they are.
+(test (merge-shapes '(and (>= D 4) (>= D C))
+                    '(and (>= D 5) (>= hcp 6)))
+      '(and (>= D C) (>= hcp 6) (>= D 5))
       equal)
 
 ;; Drop all ors from combined shapes. They would be misleading for further-bid.
@@ -562,6 +568,9 @@
 
 (defun longers (bid-meaning)
     (filter-bid bid-meaning (curry #'match-longer)))
+
+; Comparisons of two suits tell no length
+(test (longers '(and (>= D C) (>= D 4) (< H 5))) '((D 4)) equal)
 
 ;; Compute target “game” contract for a given suit.
 (defun game-in (suit)
