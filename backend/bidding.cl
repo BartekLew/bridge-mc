@@ -550,12 +550,14 @@
       '(10 8)
       equal)
 
+; Non-nil results of fn on the clauses of bid-meaning (it alone when it's a
+; single clause)
 (defun filter-bid (bid-meaning fn)
     (if bid-meaning
       (letcar bid-meaning
           (if (find head '(AND OR))
               (filter #'id (mapcar fn tail))
-              (funcall fn bid-meaning)))))
+              (filter #'id (list (funcall fn bid-meaning)))))))
 
 ;; Extract useful metadata from shape definitions:
 ;; - max-hcp/min-hcp: strength bounds
@@ -587,6 +589,7 @@
 
 ; Comparisons of two suits tell no length
 (test (longers '(and (>= D C) (>= D 4) (< H 5))) '((D 4)) equal)
+(test (longers '(>= S 5)) '((S 5)) equal)
 
 ;; Compute target “game” contract for a given suit.
 (defun game-in (suit)
