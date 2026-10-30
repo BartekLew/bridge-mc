@@ -356,14 +356,18 @@
 ;; bidding as well as our hand evaluation. These helpers let us track what partner has revealed, what
 ;; we have already shown, and whether there is more informative bidding available in the current context.
 ;; Extractors from rule trees: find “less-than/not-greater-than” constraints for a given symbol.
+;; Only numbers are bounds: (>= S H) compares two suits.
 (defun match-smaller (sym lst)
-    (or (matchlist `(< ,sym _) (curry #'+ -1) lst)
-        (matchlist `(<= ,sym _) #'id lst)))
-        
+    (or (matchlist `(< ,sym _) (lambda (v) (and (numberp v) (- v 1))) lst)
+        (matchlist `(<= ,sym _) (lambda (v) (and (numberp v) v)) lst)))
+
 ;; “Greater-than/not-less-than” constraints for a given symbol.
 (defun match-greater (sym lst)
-    (or (matchlist `(> ,sym _) (curry #'+ 1) lst)
-        (matchlist `(>= ,sym _) #'id lst)))
+    (or (matchlist `(> ,sym _) (lambda (v) (and (numberp v) (+ v 1))) lst)
+        (matchlist `(>= ,sym _) (lambda (v) (and (numberp v) v)) lst)))
+
+(test (match-greater 'S '(>= S H)) nil eq)
+(test (match-greater 'S '(> S 4)) 5 eql)
         
 ;; For suit-length constraints: return (suit, minimal length), preferring stricter bounds.
 (defun match-longer (lst)
