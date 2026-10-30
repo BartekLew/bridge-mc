@@ -13,8 +13,10 @@
 ; You should have received a copy of the GNU Affero General Public License
 ; along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-(load "bridge.cl")
-(load "compscore.cl")
+; One compilation unit, so calls to functions defined further on don't warn
+(with-compilation-unit ()
+    (load "bridge.cl")
+    (load "compscore.cl"))
 (ql:quickload '(:clack :clack-cors :jonathan :flexi-streams))
 
 (defclass table ()
@@ -153,20 +155,6 @@
                                          (append (list outcome suit) hands
                                                  (list :start start :end end :show-trump nil)))))))
 
-(defun sim-deal (defhands)
-    (let* ((hands (if (= (length defhands) 4)
-                      defhands (append defhands
-                                       (list (make-instance 'hand :remaining defhands)))))
-                                        
-           (results (list (sim-axis hands) (sim-axis (roll 1 hands)))))
-       `(:score ,(deal-score (subseq (first results) 0 3) (subseq (second results) 0 3))
-         :power ,(mapcar (lambda* (roll suit declarer tricks outcome)
-                            `(:trump ,(suitstr suit)
-                              :declarer ,declarer
-                              :score ,tricks
-                              :sequences ,(play-sequences outcome suit (roll roll hands))))
-                         (mapcar #'cons (list 0 1) results)))))
-
 ; Scores of the side winning the auction and of the other one competing
 ; over it, given (suit declarer tricks) of both sides' contracts
 (defun deal-score (a b)
@@ -183,6 +171,20 @@
                                                                (- wtricks 6)
                                                                (- wtricks 5))
                                                     :double (>= wscore 300))))))))
+
+(defun sim-deal (defhands)
+    (let* ((hands (if (= (length defhands) 4)
+                      defhands (append defhands
+                                       (list (make-instance 'hand :remaining defhands)))))
+
+           (results (list (sim-axis hands) (sim-axis (roll 1 hands)))))
+       `(:score ,(deal-score (subseq (first results) 0 3) (subseq (second results) 0 3))
+         :power ,(mapcar (lambda* (roll suit declarer tricks outcome)
+                            `(:trump ,(suitstr suit)
+                              :declarer ,declarer
+                              :score ,tricks
+                              :sequences ,(play-sequences outcome suit (roll roll hands))))
+                         (mapcar #'cons (list 0 1) results)))))
 
 (defparameter *sims-dir* (merge-pathnames "sims/" (uiop:getcwd)))
 
@@ -212,21 +214,6 @@
         (with-open-file (in (sim-path id) :if-does-not-exist nil :external-format :utf-8)
             (if in (let ((str (make-string (file-length in))))
                       (subseq str 0 (read-sequence str in)))))))
-
-(defparameter *hint-sim-timeout* 600)
-
-; Simulation of the deal, saved: by play-deal, or with engine "hints" by the
-; hint search (hint-deal, in the axes play-deal picks), its caches its own
-; so that requests running at once don't share them
-(defun sim-deal-saved (hands raw-hands &optional engine)
-    (if (equal engine "hints")
-        (let ((id (new-sim-id))
-              (*suit-solve-cache* (make-hash-table :test 'equal))
-              (*discard-costs* (make-hash-table)))
-            `(:id ,id ,@(nth-value 1 (hint-deal raw-hands (auto-axes raw-hands) :save id
-                                                :timeout *hint-sim-timeout*))))
-        (let ((result (sim-deal hands)))
-            `(:id ,(save-sim raw-hands result) ,@result))))
 
 ;; Editing play of saved simulations: tricks are removed from the end of
 ;; play or added there. Sequences cut or made by the user have no comment;
@@ -545,32 +532,10 @@
                        do (format t "  ~S~%" v)
                           (print-tricks tricks leader trump 1 "    ")))))
 
-; Plays each axis of sim id by hints (hint-deal). With save, writes the
-; deal played so as a new sim and returns its id.
-(defun hint-sim (id &key save (timeout 600))
-    (let ((sim (jonathan:parse (or (load-sim id) (error "No simulation ~A" id)))))
-        (hint-deal (getf sim :|HANDS|)
-                   (loop for axis in (getf (getf sim :|RESULT|) :|POWER|)
-                         collect (list (str2suitno (getf axis :|TRUMP|)) (declarer-seat axis)))
-                   :save (and save (new-sim-id)) :timeout timeout)))
-
 ; Hand objects N E S W of formulas of a saved sim, W the rest when missing
 (defun formula-hands (formulas)
     (let ((hs (mapcar #'str2hand formulas)))
         (if (= (length hs) 4) hs (append hs (list (make-instance 'hand :remaining hs))))))
-
-; Plays the deal of formulas by hints (hint-play) in each axis (trump
-; declarer), suit and seat numbers, printing its tricks against those of
-; play-deal and the hint line. With save, an id, writes the deal played so
-; as sim save, each sequence a plan. The search logs to log; the axes share
-; timeout seconds equally, an axis timing out giving the best line found so
-; far. Returns per axis (trump declarer play-deal-tricks tricks done
-; seconds nodes), and the result as sim-deal gives it.
-(defun hint-deal (formulas axes &key save (timeout 600) (log "hint-play.log"))
-    (with-open-file (*hint-log* (merge-pathnames log (uiop:getcwd)) :direction :output
-                                :if-exists :supersede :if-does-not-exist :create :external-format :utf-8)
-        (let ((*hint-log-time* (get-internal-real-time)))
-            (hint-deal-1 formulas axes save timeout))))
 
 (defun hint-deal-1 (formulas power save timeout)
     (let* ((objs (formula-hands formulas))
@@ -634,6 +599,28 @@
                 (when save
                     (write-sim save `(:hands ,formulas :result ,result)))
                 (values (mapcar (lambda (axis) (getf axis :summary)) axes) result)))))
+
+; Plays the deal of formulas by hints (hint-play) in each axis (trump
+; declarer), suit and seat numbers, printing its tricks against those of
+; play-deal and the hint line. With save, an id, writes the deal played so
+; as sim save, each sequence a plan. The search logs to log; the axes share
+; timeout seconds equally, an axis timing out giving the best line found so
+; far. Returns per axis (trump declarer play-deal-tricks tricks done
+; seconds nodes), and the result as sim-deal gives it.
+(defun hint-deal (formulas axes &key save (timeout 600) (log "hint-play.log"))
+    (with-open-file (*hint-log* (merge-pathnames log (uiop:getcwd)) :direction :output
+                                :if-exists :supersede :if-does-not-exist :create :external-format :utf-8)
+        (let ((*hint-log-time* (get-internal-real-time)))
+            (hint-deal-1 formulas axes save timeout))))
+
+; Plays each axis of sim id by hints (hint-deal). With save, writes the
+; deal played so as a new sim and returns its id.
+(defun hint-sim (id &key save (timeout 600))
+    (let ((sim (jonathan:parse (or (load-sim id) (error "No simulation ~A" id)))))
+        (hint-deal (getf sim :|HANDS|)
+                   (loop for axis in (getf (getf sim :|RESULT|) :|POWER|)
+                         collect (list (str2suitno (getf axis :|TRUMP|)) (declarer-seat axis)))
+                   :save (and save (new-sim-id)) :timeout timeout)))
 
 ;; Test deals for play by hints, saved as sims/hinttest-NN.json
 ; A scenario is (name count defs check contract): defs of the hands N E S
@@ -709,6 +696,14 @@
               '(3 0))
         (list "random" 1 nil nil nil)))
 
+(defun normdef (defs)
+    (loop for def in defs
+          collect (cond ((numberp def) `(,def ,def))
+                        ((and (listp def)
+                              (numberp (third def)))
+                            `(,(first def) ,(second def) (,(third def) ,(third def))))
+                        (t def))))
+
 ; Hands as suits of a deal of defs passing check
 (defun hinttest-hands (defs check k)
     (let ((deal (and defs (make-instance 'deal :~ (mapcar #'normdef defs)))))
@@ -726,6 +721,22 @@
                           (declare (ignore _))
                           (list (position suit '(c d h s))
                                 (or (position declarer *seats* :test #'equal) 3))))))
+
+(defparameter *hint-sim-timeout* 600)
+
+; Simulation of the deal, saved: by play-deal, or with engine "hints" by the
+; hint search (hint-deal, in the axes play-deal picks), its caches its own
+; so that requests running at once don't share them
+(defun sim-deal-saved (hands raw-hands &optional engine)
+    (if (equal engine "hints")
+        (let ((id (new-sim-id))
+              (*suit-solve-cache* (make-hash-table :test 'equal))
+              (*discard-facts* (make-hash-table))
+              (*standard-output* (make-broadcast-stream))) ; hint-deal prints the play for hinttest
+            `(:id ,id ,@(nth-value 1 (hint-deal raw-hands (auto-axes raw-hands) :save id
+                                                :timeout *hint-sim-timeout*))))
+        (let ((result (sim-deal hands)))
+            `(:id ,(save-sim raw-hands result) ,@result))))
 
 ; Deals of the scenarios, (name hands contract), generated from seed
 (defun hinttest-deals (seed)
@@ -873,14 +884,6 @@
     (loop for key being the hash-keys of (slot-value this 'cases)  collect key))
 
 (defparameter *jobs* (make-instance 'jobs))
-
-(defun normdef (defs)
-    (loop for def in defs
-          collect (cond ((numberp def) `(,def ,def))
-                        ((and (listp def)
-                              (numberp (third def)))
-                            `(,(first def) ,(second def) (,(third def) ,(third def))))
-                        (t def))))
 
 (defun invert-id (ids)
     (mapcar #'first (sort (zip-id ids) (lambda (a b) (< (second a) (second b))))))
