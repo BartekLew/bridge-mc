@@ -277,6 +277,13 @@ function prevSuit() { suitIndex.value = (suitIndex.value - 1 + suits.length) % s
 const formula = computed(() => edited.value.formula()); 
 
 const simulationReport = ref("");
+// Contracts (axis numbers) of the deal simulation whose play is shown, the
+// others collapsed to their result
+const openAxes = ref({});
+function toggleAxis(axisNo) {
+    openAxes.value[axisNo] = !openAxes.value[axisNo];
+}
+
 async function playSimulation(formulas = hands.value.pushed().map((hand)=>hand.formula())) {
     newMcToken();
     const response = await fetch("api/simdeal", {
@@ -287,7 +294,9 @@ async function playSimulation(formulas = hands.value.pushed().map((hand)=>hand.f
                                     },
                                     body: JSON.stringify({
                                         hands: formulas,
-                                        engine: engine.value
+                                        engine: engine.value,
+                                        // contracts to play, else the backend picks them
+                                        contracts: measures.value.split(" ").filter(Boolean)
                                     })
                                 });
     if(!response.ok) {
@@ -299,30 +308,35 @@ async function playSimulation(formulas = hands.value.pushed().map((hand)=>hand.f
 
     const body = await response.json();
     simulationReport.value = body;
+    openAxes.value = {};
     simId.value = body["ID"];
     choices.value = null;
     if(body["ID"]) {
         const url = new URL(window.location);
         url.searchParams.delete("play");
         url.searchParams.delete("engine");
+        url.searchParams.delete("measures");
         url.searchParams.set("sim", body["ID"]);
         window.history.replaceState(null, "", url);
     }
     loadHints();
 }
 
-// URL of a page playing the deal of formulas by engine (see onMounted)
+// URL of a page playing the deal of formulas by engine, in the contracts of
+// measures when given (see onMounted)
 function playUrl(formulas) {
     const url = new URL(window.location);
     url.search = "";
     url.searchParams.set("play", JSON.stringify(formulas));
     url.searchParams.set("engine", engine.value);
+    if(measures.value.trim()) url.searchParams.set("measures", measures.value.trim());
     return url.toString();
 }
 
-// Plays the deal given as ?play=<formulas as JSON>&engine=<engine>, as if its
-// hands were pushed and the simulation started
-async function playFromUrl(param, eng) {
+// Plays the deal given as ?play=<formulas as JSON>&engine=<engine>
+// (&measures=<contracts>), as if its hands were pushed and the simulation
+// started
+async function playFromUrl(param, eng, measureStr) {
     let formulas;
     try {
         formulas = JSON.parse(param);
@@ -332,6 +346,7 @@ async function playFromUrl(param, eng) {
     }
     hands.value = Hands.fromFormulas(formulas);
     if(eng) engine.value = eng;
+    if(measureStr) measures.value = measureStr;
     simulating.value = true;
     try {
         await playSimulation(formulas);
@@ -354,6 +369,7 @@ async function restoreSimulation(id) {
     const saved = await response.json();
     hands.value = Hands.fromFormulas(saved["HANDS"]);
     simulationReport.value = saved["RESULT"];
+    openAxes.value = {};
     simId.value = id;
     choices.value = null;
     loadHints();
@@ -443,7 +459,7 @@ onMounted(() => {
     if(id) {
         restoreSimulation(id);
     } else if(params.get("play")) {
-        playFromUrl(params.get("play"), params.get("engine"));
+        playFromUrl(params.get("play"), params.get("engine"), params.get("measures"));
     } else if(params.get("mc")) {
         connectMc(params.get("mc"), params.get("measures"));
     }
@@ -787,7 +803,7 @@ async function runSimulation() {
 
     <!-- Pushed hands view, also for an MC job connected to without hands -->
     <div class="bg-white shadow-lg rounded-2xl p-6 mb-4"
-         :class="simulationReport && simulationReport['SCORE'] ? 'w-fit max-w-full' : 'w-96'"
+         :class="simulationReport && simulationReport['POWER'] ? 'w-fit max-w-full' : 'w-96'"
          v-if="hands.hasPushed() || (simulationReport && simulationReport['DATA'])">
       <h3 class="text-center" v-if="hands.hasPushed()">Pushed hands:</h3>
       <ul>
@@ -869,19 +885,25 @@ async function runSimulation() {
       </div>
 
       <!-- 2. Deal simulation -->
-      <div v-if="simulationReport && simulationReport['SCORE']" class="mt-8">
-        <p v-if="simulationReport['POWER'].every(playDone)">
+      <div v-if="simulationReport && simulationReport['POWER']" class="mt-8">
+        <!-- SCORE only when one contract of each side was played -->
+        <p v-if="simulationReport['SCORE'] && simulationReport['POWER'].every(playDone)">
           Probable outcome is {{simulationReport['SCORE'][0]}} vs defence {{simulationReport['SCORE'][1]}}
         </p>
-        <div class="flex flex-col gap-8 mt-4">
+        <div class="flex flex-col gap-2 mt-4">
           <div v-for="(axis, axisNo) in simulationReport['POWER']">
-            <p class="text-center text-lg">
+            <!-- Contract with its result; a click shows or hides its play -->
+            <button class="w-full text-center text-lg rounded-xl px-3 py-1 bg-gray-100 hover:bg-gray-200"
+                    @click="toggleAxis(axisNo)">
+              <span class="inline-block w-4 text-gray-500">{{ openAxes[axisNo] ? '▾' : '▸' }}</span>
               <b>{{ axis['TRUMP'] }}</b> by <b>{{ declarerSeat(axis) }}</b>:
               <template v-if="playDone(axis)">{{ axis['SCORE'] }} tricks</template>
               <template v-else>
                 {{ axis['SCORE'] }} tricks to declarer of {{ tricksPlayed(axis) }} played
               </template>
-            </p>
+            </button>
+
+            <template v-if="openAxes[axisNo]">
 
             <!-- Play split into short sequences of tricks. Each one shows cards
                  held before it, then table view of the sequence: one row of
@@ -1039,6 +1061,7 @@ async function runSimulation() {
                         @click="editPlay(axisNo, 'split')">New sequence</button>
               </div>
             </div>
+            </template>
           </div>
         </div>
       </div>

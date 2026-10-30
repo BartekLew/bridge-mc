@@ -172,20 +172,6 @@
                                                                (- wtricks 5))
                                                     :double (>= wscore 300))))))))
 
-(defun sim-deal (defhands)
-    (let* ((hands (if (= (length defhands) 4)
-                      defhands (append defhands
-                                       (list (make-instance 'hand :remaining defhands)))))
-
-           (results (list (sim-axis hands) (sim-axis (roll 1 hands)))))
-       `(:score ,(deal-score (subseq (first results) 0 3) (subseq (second results) 0 3))
-         :power ,(mapcar (lambda* (roll suit declarer tricks outcome)
-                            `(:trump ,(suitstr suit)
-                              :declarer ,declarer
-                              :score ,tricks
-                              :sequences ,(play-sequences outcome suit (roll roll hands))))
-                         (mapcar #'cons (list 0 1) results)))))
-
 (defparameter *sims-dir* (merge-pathnames "sims/" (uiop:getcwd)))
 
 (defun sim-path (id)
@@ -298,6 +284,40 @@
         (list (and suit (nth suit '(c d h s)))
               (getf axis :|DECLARER|)
               (getf axis :|SCORE|))))
+
+; Score of the deal (deal-score) played in the axes of power, when they are
+; one contract of each side (sides, 0 for N-S, by their declarers unless
+; given), else nil
+(defun power-score (power &optional (sides (mapcar (lambda (axis) (mod (declarer-seat axis) 2)) power)))
+    (if (equal (sort (copy-list sides) #'<) '(0 1))
+        (apply #'deal-score (mapcar #'axis-contract power))))
+
+; Play of hands in trump (suit number or nil) by seat, as sim-axis gives it
+(defun contract-axis (hands trump seat)
+    (let* ((side-hands (roll (mod seat 2) hands))
+           (inner (- seat (mod seat 2)))
+           (suit (and trump (nth trump '(c d h s))))
+           (outcome (apply #'play-deal suit (roll inner side-hands))))
+        (list suit (nth seat *seats*) (second (score outcome)) outcome)))
+
+; Plays defhands in the contracts of axes, (trump declarer) suit and seat
+; numbers, or else in the best one of each side (sim-axis)
+(defun sim-deal (defhands &optional axes)
+    (let* ((hands (if (= (length defhands) 4)
+                      defhands (append defhands
+                                       (list (make-instance 'hand :remaining defhands)))))
+           (results (if axes
+                        (loop for (trump seat) in axes
+                              collect (cons (mod seat 2) (contract-axis hands trump seat)))
+                        (list (cons 0 (sim-axis hands)) (cons 1 (sim-axis (roll 1 hands))))))
+           (power (mapcar (lambda* (roll suit declarer tricks outcome)
+                             `(:trump ,(suitstr suit)
+                               :declarer ,declarer
+                               :score ,tricks
+                               :sequences ,(play-sequences outcome suit (roll roll hands))))
+                          results))
+           (score (power-score power (mapcar #'car results))))
+       `(,@(and score `(:score ,score)) :power ,power)))
 
 (defparameter *plan-types* '(:draw :draw-all :establish :duck :cash :ruff :void :cross :endplay :force :play :exit))
 
@@ -448,8 +468,8 @@
                     (setf (getf axis :|EDITED|) t)
                     (setf (getf axis :|SCORE|) (nth-value 2 (play-state hands axis)))
                     (setf (nth axis-no power) axis)
-                    (if (every (curry #'play-done? hands) power)
-                        (setf (getf result :|SCORE|) (apply #'deal-score (mapcar #'axis-contract power))))
+                    (let ((score (and (every (curry #'play-done? hands) power) (power-score power))))
+                        (if score (setf (getf result :|SCORE|) score)))
                     (write-sim id sim)
                     `(:result ,result))))))
 
@@ -588,7 +608,7 @@
                                                 :summary (,trump ,declarer ,old ,tricks ,done
                                                           ,(round (- t2 t1) internal-time-units-per-second)
                                                           ,*hint-nodes*))))))))
-            (let ((result `(:score ,(apply #'deal-score (mapcar #'axis-contract axes))
+            (let ((result `(,@(let ((score (power-score axes))) (and score `(:score ,score)))
                             :power ,(loop for axis in axes
                                           for trump = (str2suitno (getf axis :trump))
                                           collect `(:trump ,(getf axis :trump)
@@ -725,17 +745,18 @@
 (defparameter *hint-sim-timeout* 600)
 
 ; Simulation of the deal, saved: by play-deal, or with engine "hints" by the
-; hint search (hint-deal, in the axes play-deal picks), its caches its own
-; so that requests running at once don't share them
-(defun sim-deal-saved (hands raw-hands &optional engine)
+; hint search (hint-deal), its caches its own so that requests running at
+; once don't share them. Played in the contracts of axes, (trump declarer),
+; else in the ones play-deal picks.
+(defun sim-deal-saved (hands raw-hands &optional engine axes)
     (if (equal engine "hints")
         (let ((id (new-sim-id))
               (*suit-solve-cache* (make-hash-table :test 'equal))
               (*discard-facts* (make-hash-table))
               (*standard-output* (make-broadcast-stream))) ; hint-deal prints the play for hinttest
-            `(:id ,id ,@(nth-value 1 (hint-deal raw-hands (auto-axes raw-hands) :save id
+            `(:id ,id ,@(nth-value 1 (hint-deal raw-hands (or axes (auto-axes raw-hands)) :save id
                                                 :timeout *hint-sim-timeout*))))
-        (let ((result (sim-deal hands)))
+        (let ((result (sim-deal hands axes)))
             `(:id ,(save-sim raw-hands result) ,@result))))
 
 ; Deals of the scenarios, (name hands contract), generated from seed
@@ -811,10 +832,13 @@
 (defmethod combine ((this result) (other result) &optional (merger #'list-merger))
     (match this :ok (lambda (val)
                         (match other :ok (curry #'funcall merger val)
-                                     :error other))
+                                     :error (constantly other)))
                 :error (lambda (val)
-                          (match other :ok this
-                                       :error (curry #'format nil "~A~%~A" val)))))
+                          (match other :ok (constantly this)
+                                       :error (lambda (v) (make-instance 'result :error (format nil "~A~%~A" val v)))))))
+
+(test (match (combine (make-instance 'result :ok '(1)) (make-instance 'result :error "bad")) :error #'identity)
+      "bad" equal)
 
 (defun simple-endpoint (env fields function &key parse-args)
     (let* ((request (jonathan:parse (read-body env)))
@@ -986,6 +1010,24 @@
                                             (list tricks (base-score result)))))))))
                     names))))
 
+; Axes (trump declarer), suit and seat numbers, of contract names as
+; measures take them (4SN, 3NTE; the level doesn't matter), nil for none
+(defun contracts-parser (names)
+    (let ((axes (loop for name in names
+                      for c = (ignore-errors (make-instance 'contract := name))
+                      for suit = (and c (suit c))
+                      collect (and suit (declarer c)
+                                   (list (or (position suit '(c d h s)) (position suit '(♣ ♦ ♥ ♠)))
+                                         (position (declarer c) '(n e s w)))))))
+        (if (member nil axes)
+            (make-instance 'result :error (format nil "Contract ~A needs a suit and a declarer, like 4SN"
+                                                  (nth (position nil axes) names)))
+            (make-instance 'result :ok axes))))
+
+(test (val (contracts-parser '("4SN" "3NTE" "5♦W"))) '((3 0) (nil 1) (1 3)) equal)
+(test (ok? (contracts-parser '("4S"))) nil eq)
+(test (val (contracts-parser nil)) nil eq)
+
 (defun measure-sym-parser (names)
     (make-instance 'result :ok (filter (lambda (sym)
                                             (and sym (ignore-errors (eval `(function ,sym)))))
@@ -1019,10 +1061,10 @@
           (simple-endpoint env '(:|user| :|since|) (curry #'auction *table*)
                                :parse-args (list *user-validator*)))
       ((string= path "/api/simdeal")
-          (simple-endpoint env '(:|hands| :|hands| :|engine|) #'sim-deal-saved
+          (simple-endpoint env '(:|hands| :|hands| :|engine| :|contracts|) #'sim-deal-saved
                                :parse-args (list (f* (curry #'mapcar #'hand-parser)
                                                      (curry #'fold #'combine (make-instance 'result)))
-                                                 nil nil)))
+                                                 nil nil #'contracts-parser)))
       ((string= path "/api/simedit")
        (let ((request (jonathan:parse (read-body env))))
           (handler-case (json-response 200 (sim-edit (getf request :|id|) (getf request :|axis|)
