@@ -1117,7 +1117,12 @@
                                   for supply in breakdown
                                   collect (deal amount supply))))))
 
+; No hand of the cards left fits a distgen
+(define-condition no-hand (error) ()
+    (:report (lambda (c s) (declare (ignore c)) (format s "No hand fits the cards left"))))
+
 (defmethod rand-hand ((self distgen) cards)
+    (if (zerop (total-weight self)) (error 'no-hand))
     (let ((x (random (total-weight self))))
         (setf (slot-value self 'cur) nil)
         (loop for opt = (next self)
@@ -1357,7 +1362,18 @@
     (with-slots (const-hands defs) this
         (format out "DEAL<~A, ~A>" const-hands defs)))
 
+; Times build deals the hands again when a later one doesn't fit the cards
+; the earlier ones left (ranges impossible from the start are errors at once)
+(defparameter *build-tries* 1000)
+
 (defmethod build ((this deal))
+    (loop repeat *build-tries*
+          do (handler-case (return-from build (build-1 this))
+                 (no-hand () nil)
+                 (bad-range (e) (if (not (slot-value this 'rootgen)) (error e))))
+          finally (error 'no-hand)))
+
+(defmethod build-1 ((this deal))
     (with-slots (defs const-hands rootgen) this
         (let ((cards (if const-hands (second (remove-cards (apply #'append (mapcar #'unhand const-hands))
                                                                (all-cards)))
@@ -1385,7 +1401,7 @@
                                          hands 
                                          (mapcar (f* #'hand #'mkhand) (deal-all 13 rest*)))
                                  hands)))))))
-          
+
 ;======================================
 ; Monte-carlo deals & reporting stats
 ;======================================
@@ -1706,6 +1722,15 @@
               (hand (second (remove-cards (apply #'append
                                                  (mapcar (f* #'pretty-tree #'unhand) remaining))
                                           (all-cards)))))))
+
+; Hands are dealt one after another, so the cards a hand takes may leave none
+; that fit a later one (here N's honours S's suit points): such deals are
+; dealt again
+(test (let ((d (make-instance 'deal :~ '((:hcp (15 17) :s (2 4) :h (2 4) :d (2 4) :c (2 4))
+                                         nil
+                                         (:hcp (8 10) :h (5 nil (3 nil)) :d (4 nil (4 nil)))))))
+          (loop repeat 200 always (= (length (build d)) 4)))
+      t eq)
 
 (defmethod take-card ((this hand) card)
     (list card (make-instance 'hand := (loop for suit from 0 to 4
