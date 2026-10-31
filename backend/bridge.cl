@@ -1118,8 +1118,9 @@
                                   collect (deal amount supply))))))
 
 ; No hand of the cards left fits a distgen
-(define-condition no-hand (error) ()
-    (:report (lambda (c s) (declare (ignore c)) (format s "No hand fits the cards left"))))
+(define-condition no-hand (error)
+    ((msg :initarg :msg :initform "No hand fits the cards left" :reader no-hand-msg))
+    (:report (lambda (c s) (format s "~A" (no-hand-msg c)))))
 
 (defmethod rand-hand ((self distgen) cards)
     (if (zerop (total-weight self)) (error 'no-hand))
@@ -1160,18 +1161,24 @@
     ((down :initarg :down :reader down)
      (up :initarg :up :reader up)
      (msg :initarg :msg :reader msg)
-     (val :initarg :val :initform nil :reader val))
+     (val :initarg :val :initform nil :reader val)
+     (leave :initarg :leave :initform "the other hands leave" :reader leave))
     (:report (lambda (obj out)
-                (if (val obj)
-                    (format out "~A: val '~A' in <~A-~A>"
-                            (or (msg obj) "out of range")
-                                (val obj) (down obj)
-                                (up obj))
-                    (format out "~A: <~A-~A>"
-                            (or (msg obj) "out of range")
-                            (down obj)
-                            (up obj))))))
-                            
+                (format out "~A; ~A ~A-~A"
+                        (or (msg obj) "Out of range") (leave obj) (down obj) (up obj)))))
+
+; A range as the user gives it: 5, (5 7), (5 nil) or (nil 7)
+(defun range-str (def)
+    (cond ((not (listp def)) (format nil "~A" def))
+          ((and (first def) (eql (first def) (second def))) (format nil "~A" (first def)))
+          ((and (first def) (second def)) (format nil "~A-~A" (first def) (second def)))
+          ((first def) (format nil "~A+" (first def)))
+          ((second def) (format nil "up to ~A" (second def)))
+          (t "any")))
+
+; What infer-hcp-range limits, for its errors
+(defvar *range-what* "HCP")
+
 
 (defun infer-hcp-range (supply base-params &rest other-defs)
     (let* ((total-hcp (permut-hcp (apply #'append (mapcar #'cdr supply))))
@@ -1191,15 +1198,16 @@
                       ((listp hcp) (let ((down (max (or (first hcp) 0) min-hcp))
                                          (up (if (second hcp) (min (second hcp) up-limit)
                                                               up-limit)))
-                                      (if (> down up) 
-                                          (error 'bad-range :msg "Can't infer correct limit!"
-                                                            :down down :up up))
+                                      (if (> down up)
+                                          (error 'bad-range :msg (format nil "~A ~A can't be met" *range-what*
+                                                                         (range-str hcp))
+                                                            :down min-hcp :up up-limit))
                                       `(:hcp (,down
                                               ,up))))
                       (t (if (or (> hcp up-limit)
                                  (< hcp min-hcp))
-                             (error 'bad-range :msg "Can't infer correct limit!"
-                                               :down min-hcp :up max-hcp :val hcp))
+                             (error 'bad-range :msg (format nil "~A ~A can't be met" *range-what* hcp)
+                                               :down min-hcp :up up-limit :val hcp))
                          `(:hcp ,hcp)))))))
 
 (test (infer-hcp-range (supply (all-cards)) '(:hcp (11 15) :c (6 nil) :h (0 2))
@@ -1274,27 +1282,34 @@
                   for suit-hcp in suit-hcp-defs
                   for suit-supply in supply
                   for key in '(:c :d :h :s)
+                  for name in '("♣" "♦" "♥" "♠")
                   for def in (list c d h s)
                   append (let ((up-limit (min maxlen slen)))
-                              (cond ((not def) (if (or (< up-limit slen) (> minlen 0)) `(,key (,minlen ,up-limit))))
+                           ; The suit HCP range of hcp (the hand's own, or
+                           ; nil) leaving the later hands theirs, as a list
+                           (flet ((hcp-range (hcp)
+                                    (cond (suit-hcp
+                                           (let ((*range-what* (format nil "~A points" name)))
+                                               (cdr (apply #'infer-hcp-range
+                                                           `((,suit-supply) (:hcp ,hcp) ,@suit-hcp)))))
+                                          (hcp (list hcp))))
+                                  (bad-length (def)
+                                    (error 'bad-range :msg (format nil "~A length ~A can't be met" name (range-str def))
+                                                      :down minlen :up up-limit)))
+                              (cond ((not def) (let ((h (hcp-range nil)))
+                                                  (if (or h (< up-limit slen) (> minlen 0))
+                                                      `(,key (,minlen ,up-limit ,@h)))))
                                     ((listp def) (let ((down (if (first def) (max (first def) minlen)
                                                                              minlen))
                                                        (up (if (second def) (min (second def) up-limit)
-                                                                            up-limit))
-                                                       (hcp (if (listp def) (third def))))
-                                                    (if (> down up-limit) 
-                                                        (error 'bad-range :msg "Can't infer correct limit!"
-                                                               :down down :up up))
-                                                    `(,key (,down ,up
-                                                            ,@(cond (suit-hcp
-                                                                     (cdr (apply #'infer-hcp-range
-                                                                                 `((,suit-supply) (:hcp ,hcp) ,@suit-hcp))))
-                                                                    (hcp (list hcp)))))))
+                                                                            up-limit)))
+                                                    (if (> down up) (bad-length def))
+                                                    `(,key (,down ,up ,@(hcp-range (third def))))))
                                     (t (if (or (> def up-limit)
                                                (< def minlen))
-                                           (error 'bad-range :msg "Can't infer correct limit!"
-                                                             :down minlen :up up-limit :val def)
-                                           `(,key ,def)))))))))
+                                           (bad-length def))
+                                       (let ((h (hcp-range nil)))
+                                           (if h `(,key (,def ,def ,@h)) `(,key ,def)))))))))))
 
 (test (infer-suit-ranges (supply (all-cards)) '(:hcp (11 15) :c (6 nil) :h (0 2))
                                               '(:hcp (12 15) :c (3 5) :d (1 5))
@@ -1337,9 +1352,111 @@
       '(:c (6 6 (9 9)))
       equal)
 
+; A hand with no range of a suit, or just its length, leaves the suit points
+; a later hand needs: E dealt before S, who wants ♥ 3+ and ♦ 4+ points
+(test (infer-suit-ranges (supply (all-cards)) nil
+                         '(:hcp (8 10) :h (5 nil (3 nil)) :d (4 nil (4 nil))))
+      '(:d (0 9 (0 6)) :h (0 8 (0 7)))
+      equal)
+
+(test (infer-suit-ranges (supply (all-cards)) '(:d 3)
+                         '(:hcp (8 10) :h (5 nil (3 nil)) :d (4 nil (4 nil))))
+      '(:d (3 3 (0 6)) :h (0 8 (0 7)))
+      equal)
+
+; Impossible ranges tell what was asked and what the other hands leave
+(test (handler-case (infer-suit-ranges (supply (all-cards)) '(:s (11 nil)) '(:s (3 nil)))
+          (bad-range (e) (princ-to-string e)))
+      "♠ length 11+ can't be met; the other hands leave 0-10"
+      equal)
+
+(test (handler-case (infer-hcp-range (supply (all-cards)) '(:hcp (15 17)) '(:hcp (26 nil)))
+          (bad-range (e) (princ-to-string e)))
+      "HCP 15-17 can't be met; the other hands leave 0-14"
+      equal)
+
+;; Consistency of a hand's own ranges
+; Before the other hands' ranges are inferred from a def, its suit ranges are
+; made to agree with its total and with each other: a suit holds at most the
+; total points less the other suits' least, at least the total less their
+; most, and its length likewise within 13 cards. Only suits the def names
+; get bounds, and only ones that tighten, so a def needing none stays as it is.
+
+; (min max) of a range as defs give it: a number, a list or nil
+(defun def-range (x)
+    (cond ((null x) (list nil nil))
+          ((listp x) (list (first x) (second x)))
+          (t (list x x))))
+
+(defun consistent-def (def)
+    (let* ((keys '(:c :d :h :s))
+           (names '("♣" "♦" "♥" "♠"))
+           (vals (mapcar (lambda (k) (getf def k)) keys))
+           (lens (mapcar (lambda (v) (def-range (if (listp v) (subseq v 0 (min 2 (length v))) v))) vals))
+           (pts (mapcar (lambda (v) (def-range (and (listp v) (third v)))) vals))
+           (total (def-range (getf def :hcp)))
+           (ans (copy-list def)))
+        (labels ((sum-others (ranges i fn default)
+                    (loop for r in ranges
+                          for j from 0
+                          unless (= i j) sum (or (funcall fn r) default)))
+                 ; range tightened to lo and hi where they bind (nil: no bound)
+                 (tighten (range lo hi floor ceiling)
+                    (list (if (and lo (> lo (or (first range) floor))) lo (first range))
+                          (if (and hi (< hi (or (second range) ceiling))) hi (second range))))
+                 (check (name what old new lo hi)
+                    (if (and (first new) (second new) (> (first new) (second new)))
+                        (error 'bad-range :msg (format nil "~A ~A ~A can't be met" name what (range-str old))
+                                          :leave "the hand's other ranges leave"
+                                          :down (max (or lo 0) 0) :up hi))))
+            (loop for k in keys
+                  for name in names
+                  for v in vals
+                  for len in lens
+                  for pt in pts
+                  for i from 0
+                  when v
+                  do (let* ((len-lo (- 13 (sum-others lens i #'second 13)))
+                            (len-hi (- 13 (sum-others lens i #'first 0)))
+                            (pt-lo (and (first total) (- (first total) (sum-others pts i #'second 10))))
+                            (pt-hi (and (second total) (- (second total) (sum-others pts i #'first 0))))
+                            (len* (tighten len len-lo len-hi 0 13))
+                            (pt* (tighten pt pt-lo pt-hi 0 10)))
+                        (check name "length" len len* len-lo len-hi)
+                        (check name "points" pt pt* pt-lo pt-hi)
+                        (unless (and (equal len len*) (equal pt pt*))
+                            (setf (getf ans k) (if (equal pt* '(nil nil)) len* (append len* (list pt*)))))))
+            ans)))
+
+; A hand's own ranges agree with each other: S 8-10 with ♦ 4+ and ♥ 3+
+; points holds at most 7 of them in diamonds and 6 in hearts
+(test (consistent-def '(:hcp (8 10) :h (5 nil (3 nil)) :d (4 nil (4 nil))))
+      '(:hcp (8 10) :h (5 9 (3 6)) :d (4 8 (4 7)))
+      equal)
+
+(test (consistent-def '(:hcp (15 17) :s (2 4) :h (2 4) :d (2 4) :c (2 4)))
+      '(:hcp (15 17) :s (2 4) :h (2 4) :d (2 4) :c (2 4))
+      equal)
+
+(test (consistent-def '(:s (6 nil) :h 5))
+      '(:s (6 8) :h 5)
+      equal)
+
+(test (consistent-def '(:hcp (12 nil) :c (nil nil (nil 2)) :d (nil nil (nil 2)) :h (nil nil (nil 3)) :s (4 nil)))
+      '(:hcp (12 nil) :c (nil 9 (nil 2)) :d (nil 9 (nil 2)) :h (nil 9 (nil 3)) :s (4 nil (5 nil)))
+      equal)
+
+(test (handler-case (consistent-def '(:hcp (nil 5) :h (nil nil (6 nil))))
+          (bad-range (e) (princ-to-string e)))
+      "♥ points 6+ can't be met; the hand's other ranges leave 0-5"
+      equal)
+
+; Ranges of base, made consistent like those of the others, against them
 (defun infer-distgen-params (supply base others)
-   (append (apply #'infer-hcp-range `(,supply ,base ,@others))
-           (apply #'infer-suit-ranges `(,supply ,base ,@others))))
+   (let ((base (consistent-def base))
+         (others (mapcar #'consistent-def others)))
+       (append (apply #'infer-hcp-range `(,supply ,base ,@others))
+               (apply #'infer-suit-ranges `(,supply ,base ,@others)))))
 
 (test (INFER-DISTGEN-PARAMS '((7 0 0 1 0) (4 0 1 0 0) (5 1 0 0 1) (3 0 1 1 1)) 
                             '(:HCP (6 10) :H (7 NIL)) 
@@ -1350,7 +1467,7 @@
 (test (infer-distgen-params '((9 1 1 1 1) (9 1 1 1 1) (9 1 1 1 1) (9 1 1 1 1)) 
                             '(:HCP (15 17) :S (5 NIL) :H (4 NIL)) 
                             NIL)
-      '(:HCP (15 17) :H (4 13) :S (5 13))
+      '(:HCP (15 17) :H (4 8) :S (5 9))
       equal)
 
 (defclass deal ()
@@ -1371,7 +1488,8 @@
           do (handler-case (return-from build (build-1 this))
                  (no-hand () nil)
                  (bad-range (e) (if (not (slot-value this 'rootgen)) (error e))))
-          finally (error 'no-hand)))
+          finally (error 'no-hand :msg (format nil "No deal found in ~D tries: the hands dealt first ~
+                                                   leave no cards fitting a later one" *build-tries*))))
 
 (defmethod build-1 ((this deal))
     (with-slots (defs const-hands rootgen) this
