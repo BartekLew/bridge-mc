@@ -1048,14 +1048,19 @@
 
         (cond
           ((> partner-len 0)
+           ;; game in partner's suit, by points or, with a fit, by losers as
+           ;; bid-ladder counts them; before the raise, which may overlap by losers
+           (let ((game (game-in suit)))
+             (push (cons game
+                         `(or (>= hcp ,(- (game-hcp suit) (or partner-min 0)))
+                              (and (<= losers ,(+ (- 7 (first game) 1)
+                                                  (hcp-tricks (or partner-min 0))))
+                                   (>= ,suit ,(- 8 partner-len)))))
+                   bid-scheme))
            ;; cheapest raise, up to game when there's no cue-bid (below)
            (let ((bid (level-bid partner-min suit (- 8 partner-len) last-bid
                                  (if (and last-opp-suit (not our)) 3 1))))
               (if bid (push bid bid-scheme)))
-           ;; game in partner's suit
-           (push (cons (game-in suit)
-                       `(>= hcp ,(- (game-hcp suit) (or partner-min 0))))
-                 bid-scheme)
            ;; preemptive jump – strength limit is inside the rule
            (let ((preempt (jump-bid suit last-bid 1)))
              (if (and preempt (<= (first preempt) 3))
@@ -1406,6 +1411,15 @@
                                 (str2hand "S: ♠ J873 ♥ K872 ♦ QJ10 ♣ A8")
                                 (str2hand "W: ♠ 62 ♥ A106 ♦ 842 ♣ K7643"))))
       '((1 H) (2 D) (3 D) nil (3 H) nil nil nil)
+      equal)
+
+;; Over partner's cue-bid raise (11+) a 12-count with 5 losers bids game
+(test (drain (make-instance 'bidding
+                    :deal (list (str2hand "N: ♠ 432 ♥ AK ♦ A8543 ♣ 1095")
+                                (str2hand "E: ♠ KJ975 ♥ J5432 ♦ J9 ♣ 3")
+                                (str2hand "S: ♠ AQ1086 ♥ 106 ♦ 6 ♣ KQJ64")
+                                (str2hand "W: ♠  ♥ Q987 ♦ KQ1072 ♣ A872"))))
+      '(nil nil (1 S) (2 D) (3 D) nil (4 S) nil nil nil)
       equal)
 
 ;; Partner answers a takeout double; the doubler shows 18+ with a new suit
