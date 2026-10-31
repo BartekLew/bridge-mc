@@ -586,6 +586,23 @@
       '(>= hcp 12)
       equal)
 
+;; Losers a bid shows as an alternative to points, (or (>= hcp _) (<= losers _)),
+;; or alone
+(defun shown-losers (bid-meaning)
+    (find-in-bid bid-meaning (orf (curry #'match-smaller 'losers)
+                                  (curry #'matchlist '(or (_ hcp _) (<= losers _))
+                                                     (lambda (op hcp losers)
+                                                        (declare (ignore op hcp))
+                                                        losers))
+                                  (curry #'matchlist '(or (_ hcp _) (< losers _))
+                                                     (lambda (op hcp losers)
+                                                        (declare (ignore op hcp))
+                                                        (- losers 1))))))
+
+(test (shown-losers '(and (or (>= hcp 11) (<= losers 7)) (>= S 3))) 7 eql)
+(test (shown-losers '(and (or (> hcp 11) (< losers 6)) (> losers 4) (>= S 5))) 5 eql)
+(test (shown-losers '(and (>= hcp 7) (<= hcp 10) (>= S 3))) nil eq)
+
 (defun longers (bid-meaning)
     (filter-bid bid-meaning (curry #'match-longer)))
 
@@ -988,14 +1005,21 @@
 
 (defun game-hcp (suit) (if (find suit '(C D)) 27 25))
 
+; Most losers of a hand making level in a fit, partner having partner-min HCP,
+; as bid-ladder counts them
+(defun level-losers (level partner-min)
+    (+ (- 7 level 1) (hcp-tricks (or partner-min 0))))
+
 ; Cheapest raise in suit, up to below points short of game: 1, or 3 when a
-; cue-bid shows the hands in between
-(defun level-bid (partner-min suit len last-bid &optional (below 3))
+; cue-bid shows the hands in between, also those with no more than
+; cue-losers
+(defun level-bid (partner-min suit len last-bid &optional (below 3) cue-losers)
     (let ((bid (jump-bid suit last-bid 0)))
         (if bid (let* ((min-hcp (- (+ 13 (* 3 (first bid))) (or partner-min 0)))
                        (max-hcp (- (game-hcp suit) (or partner-min 0) below)))
                    (if (>= max-hcp min-hcp)
-                      (cons bid `(and (>= hcp ,min-hcp) (<= hcp ,max-hcp) (>= ,suit ,len))))))))
+                      (cons bid `(and (>= hcp ,min-hcp) (<= hcp ,max-hcp) (>= ,suit ,len)
+                                      ,@(if cue-losers `((> losers ,cue-losers))))))))))
 
 (defun legal-bid (bid last-bid last-opp?)
     (cond ((not bid) T)
@@ -1049,17 +1073,27 @@
         (cond
           ((> partner-len 0)
            ;; game in partner's suit, by points or, with a fit, by losers as
-           ;; bid-ladder counts them; before the raise, which may overlap by losers
-           (let ((game (game-in suit)))
+           ;; bid-ladder counts them; before the raise, which may overlap by
+           ;; losers. When partner, after our bid, showed losers (a cue-bid),
+           ;; by LTC too: tricks are 24 less the losers of both hands, his
+           ;; being no more than his points or the losers he showed allow.
+           (let* ((game (game-in suit))
+                  (shown (and our (shown-losers partner)))
+                  (max-losers (if shown
+                                  (max (level-losers (first game) partner-min)
+                                       (- 24 (first game) 6
+                                          (max shown (hcp-losers (or partner-min 0)))))
+                                  (level-losers (first game) partner-min))))
              (push (cons game
                          `(or (>= hcp ,(- (game-hcp suit) (or partner-min 0)))
-                              (and (<= losers ,(+ (- 7 (first game) 1)
-                                                  (hcp-tricks (or partner-min 0))))
+                              (and (<= losers ,max-losers)
                                    (>= ,suit ,(- 8 partner-len)))))
                    bid-scheme))
            ;; cheapest raise, up to game when there's no cue-bid (below)
-           (let ((bid (level-bid partner-min suit (- 8 partner-len) last-bid
-                                 (if (and last-opp-suit (not our)) 3 1))))
+           (let* ((cue? (and last-opp-suit (not our)))
+                  (bid (level-bid partner-min suit (- 8 partner-len) last-bid
+                                  (if cue? 3 1)
+                                  (if cue? (level-losers (1- (first (game-in suit))) partner-min)))))
               (if bid (push bid bid-scheme)))
            ;; preemptive jump – strength limit is inside the rule
            (let ((preempt (jump-bid suit last-bid 1)))
@@ -1087,18 +1121,19 @@
                                           (or (> losers 5) (< hcp 11))))
                           bid-scheme))))))))
 
-    ;; Cue-bids
+    ;; Cue-bids: a raise with invitational values or more, by points or by
+    ;; losers as the invitation below game counts them
     (when (and last-opp-suit (not our))
-       (push (cons (jump-bid last-opp-suit last-bid 0)
-                   (cond ((not partner-long-suits) nil)
-                         ((= (length partner-long-suits) 1)
-                            (let ((longer (first partner-long-suits)))
-                               `(and (>= hcp ,(- (game-hcp (first longer)) partner-min 2))
-                                     (>= ,(first longer) ,(- 8 (second longer))))))
-                         (t `(or ,@(loop for longer in partner-long-suits
-                                         collect `(and (>= hcp ,(- (game-hcp (first longer)) partner-min 2))
-                                                       (>= ,(first longer) ,(- 8 (second longer)))))))))
-              bid-scheme))
+       (flet ((cue-rule (longer)
+                (let ((suit (first longer)))
+                   `(and (or (>= hcp ,(- (game-hcp suit) partner-min 2))
+                             (<= losers ,(level-losers (1- (first (game-in suit))) partner-min)))
+                         (>= ,suit ,(- 8 (second longer)))))))
+         (push (cons (jump-bid last-opp-suit last-bid 0)
+                     (cond ((not partner-long-suits) nil)
+                           ((= (length partner-long-suits) 1) (cue-rule (first partner-long-suits)))
+                           (t `(or ,@(mapcar #'cue-rule partner-long-suits)))))
+               bid-scheme)))
 
                    
     ;; NT bids
@@ -1404,13 +1439,14 @@
       '(nil nil (1 NT) nil (2 C) nil (2 H) nil (2 S) nil (4 S) nil nil nil)
       equal)
 
-;; Over partner's cue-bid raise the opener doesn't pass
+;; Over partner's cue-bid raise the opener doesn't pass; with 6 losers he
+;; bids game (LTC: 6 + 7 at most), which makes 10 tricks
 (test (drain (make-instance 'bidding
                     :deal (list (str2hand "N: ♠ AQ4 ♥ QJ9543 ♦ K3 ♣ J10")
                                 (str2hand "E: ♠ K1095 ♥  ♦ A9765 ♣ Q952")
                                 (str2hand "S: ♠ J873 ♥ K872 ♦ QJ10 ♣ A8")
                                 (str2hand "W: ♠ 62 ♥ A106 ♦ 842 ♣ K7643"))))
-      '((1 H) (2 D) (3 D) nil (3 H) nil nil nil)
+      '((1 H) (2 D) (3 D) nil (4 H) nil nil nil)
       equal)
 
 ;; Over partner's cue-bid raise (11+) a 12-count with 5 losers bids game
@@ -1420,6 +1456,16 @@
                                 (str2hand "S: ♠ AQ1086 ♥ 106 ♦ 6 ♣ KQJ64")
                                 (str2hand "W: ♠  ♥ Q987 ♦ KQ1072 ♣ A872"))))
       '(nil nil (1 S) (2 D) (3 D) nil (4 S) nil nil nil)
+      equal)
+
+;; A 10-count with four trumps and a singleton (7 losers) is too strong for a
+;; simple raise: it cue-bids; the opener with 7 losers too bids game (LTC)
+(test (drain (make-instance 'bidding
+                    :deal (list (str2hand "N: ♠ AK74 ♥ K763 ♦ 7654 ♣ 6")
+                                (str2hand "E: ♠ Q96 ♥ J8542 ♦ KJ10 ♣ 109")
+                                (str2hand "S: ♠ J10852 ♥ 10 ♦ AQ9 ♣ AJ43")
+                                (str2hand "W: ♠ 3 ♥ AQ9 ♦ 832 ♣ KQ8752"))))
+      '(nil nil (1 S) (2 C) (3 C) nil (4 S) nil nil nil)
       equal)
 
 ;; Partner answers a takeout double; the doubler shows 18+ with a new suit
