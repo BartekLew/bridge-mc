@@ -23,7 +23,9 @@
 <script setup>
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import PlayAxis from './PlayAxis.vue'
+import HandEditor from './HandEditor.vue'
 import { suits, seats, suitColors, trickBySeat, formulasDeal, postJson } from './play.js'
+import { Hands } from './hands.js'
 
 const roles = [
     { value: 'declarer', label: 'Declarer' },
@@ -32,6 +34,12 @@ const roles = [
     { value: 'defender', label: 'Defender, either' }
 ];
 const role = ref('declarer');
+
+// Hands of the deals to come, N E S W as in the simulator (N deals; seats
+// after the pushed ones are random): cards or ranges. The deal is turned
+// so that the user sits S in his role.
+const hands = ref(new Hands());
+const showHands = ref(false);
 
 // The game as training-view in rest.cl gives it
 const game = ref(null);
@@ -61,7 +69,8 @@ async function newGame() {
     busy.value = true;
     try {
         sim.value = null;
-        const body = await postJson("api/train", { role: role.value }, "Cannot deal");
+        const defs = hands.value.pushed().map((hand) => hand.restDef());
+        const body = await postJson("api/train", { role: role.value, defs: defs }, "Cannot deal");
         if(body) await showGame(body);
     } finally {
         busy.value = false;
@@ -184,6 +193,30 @@ const simDeal = computed(() => sim.value && formulasDeal(sim.value.hands));
               :class="busy ? 'bg-gray-300' : 'bg-blue-200 hover:bg-blue-300'">
         {{ busy && !game ? 'Dealing…' : 'New deal' }}
       </button>
+      <button @click="showHands = !showHands" class="text-sm text-blue-700 underline">
+        {{ showHands ? 'Hide hands' : 'Set hands' }}{{ hands.hasPushed() ? ` (${hands.pushed().length} set)` : '' }}
+      </button>
+    </div>
+
+    <!-- Hands of the deals to come, as in the simulator -->
+    <div v-if="showHands" class="flex flex-col items-center gap-2">
+      <div class="bg-white shadow-lg rounded-2xl p-4 w-96 text-sm">
+        <p class="text-gray-600">
+          Hands N E S W (N deals), by cards or ranges; the seats after them are
+          random. The deal is turned so that you sit S in your role.
+        </p>
+        <ul v-if="hands.hasPushed()">
+          <li v-for="hand in hands.pushed()"
+              class="bg-gray-200 rounded-2xl p-2 shadow-sm text-center mt-2 font-mono">
+            {{ hand.formula() }}
+          </li>
+        </ul>
+        <button v-if="hands.hasPushed()" @click="hands = new Hands()"
+                class="mt-2 w-full py-1 rounded-xl font-semibold bg-red-200 hover:bg-red-300">
+          Clear all
+        </button>
+      </div>
+      <HandEditor :hands="hands" />
     </div>
 
     <div v-if="game" class="bg-white shadow-lg rounded-2xl p-6 flex flex-col items-center gap-4">

@@ -785,12 +785,32 @@
             (write-sim id game *training-dir*)
             (training-view id game))))
 
-; New game of the player in role (see *training-roles*)
-(defun training-new (role)
+; Generator of training deals of defs as /api/mc takes them (nil for random
+; deals) and how many deals to try: the deal itself when its hands are given
+; (three at least), else random ones fitting the defs
+(defun training-generator (defs)
+    (let ((defs (match (hand-or-def-parser defs) :error (lambda (e) (edit-error "Bad hands: ~A" e)))))
+        (cond ((null defs) (list (lambda () (build full-random)) nil))
+              ((and (>= (length defs) 3) (every (lambda (d) (eq (type-of d) 'hand)) defs))
+                 (let ((hands (if (= (length defs) 4)
+                                  defs (append defs (list (make-instance 'hand :remaining defs))))))
+                     (list (lambda () hands) 1)))
+              (t (destructuring-bind (d order) (defs-generator defs)
+                     (list (lambda () (reorder (build d) order)) 1000))))))
+
+; New game of the player in role (see *training-roles*) on a deal of defs
+; (see training-generator)
+(defun training-new (role &optional defs)
     (if (not (member role *training-roles* :test #'equal))
         (edit-error "Bad role ~A" role))
     (destructuring-bind (hands dealer bids (level trump declarer doubled))
-            (training-deal (intern (string-upcase role) :keyword))
+            (or (destructuring-bind (generator tries)
+                        (handler-case (training-generator defs)
+                            (edit-error (e) (error e))
+                            (error (e) (edit-error "Bad hands: ~A" e)))
+                    (handler-case (training-deal (intern (string-upcase role) :keyword) generator tries)
+                        (error (e) (edit-error "Cannot deal these hands: ~A" e))))
+                (edit-error "These hands are passed out"))
         (training-advance (new-sim-id)
                           `(:hands ,(loop for seat from 0 below 4 collect (hand-formula hands seat))
                             :role ,role
@@ -1092,20 +1112,26 @@
 (test (invert-id '(2 0 1 3)) '(1 2 0 3) equal)
 (test (invert-id '(3 2 0 1)) '(2 3 1 0) equal)
 
-(defun mc-deal (defs measures)
+; Deal of defs (hands or ranges of seats N E S W in this order, the seats
+; after them random) and the order turning the hands it builds into seats
+; N E S W, as (deal order)
+(defun defs-generator (defs)
     (let-from! (mapcar #'reverse (divlist (list (f* #'second #'type-of (curry #'eq 'hand)))
                                           (zip-id defs)))
                (consts ranged)
-       (let* ((d (make-instance 'deal := (mapcar (f* #'second #'pretty-tree) consts)
-                                      :~ (mapcar (f* #'second #'normdef) ranged)))
-              (reorder (close-list (invert-id (mapcar #'first (append consts ranged))) '(0 1 2 3))))
+       (list (make-instance 'deal := (mapcar (f* #'second #'pretty-tree) consts)
+                                  :~ (mapcar (f* #'second #'normdef) ranged))
+             (close-list (invert-id (mapcar #'first (append consts ranged))) '(0 1 2 3)))))
+
+(defun mc-deal (defs measures)
+    (destructuring-bind (d reorder) (defs-generator defs)
          (let-from! (add-job *jobs* (make-instance 'mc-case :! `(reorder (build ,d) ',reorder)
                                                             := (or measures '(best-outcomes))))
                     (id mc)
            (sim mc 500)
            (sleep 5)
            `(:status in-progress :job-id ,id
-             :data ,(histogram (mapcar (curry #'apply #'append) (select mc))))))))
+             :data ,(histogram (mapcar (curry #'apply #'append) (select mc)))))))
 
 ;; Deals of a group of an MC simulation: the frontend sends the values of a
 ;; line of its histogram from the top (prefix), the group being the deals
@@ -1257,7 +1283,7 @@
                                           (getf request :|trick|) (getf request :|plan|)
                                           (getf request :|tricks|))))))
       ((string= path "/api/train")
-       (edit-endpoint env (lambda (request) (training-new (getf request :|role|)))))
+       (edit-endpoint env (lambda (request) (training-new (getf request :|role|) (getf request :|defs|)))))
       ((and (substr= "/api/train/" path) (search "/play" path))
        (let ((id (subseq path (length "/api/train/") (search "/play" path))))
           (edit-endpoint env (lambda (request) (training-play id (getf request :|card|))))))

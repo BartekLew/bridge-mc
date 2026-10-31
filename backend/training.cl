@@ -133,13 +133,16 @@
                          (:defender (randcar '(1 3)))))
          4))
 
-; New random deal bid by the computer, turned so the player in role sits S
-; (seat 2), as (hands dealer bids contract), contract as auction-contract
-; gives it. Passed out deals are dealt again, as are those the bidding fails
-; on (the error is printed).
-(defun training-deal (role)
-    (loop
-        (let* ((objs (build full-random))
+; New deal of generator (hand objects N E S W, N dealing) bid by the
+; computer, turned so the player in role sits S (seat 2), as (hands dealer
+; bids contract), contract as auction-contract gives it. Passed out deals are
+; dealt again, as are those the bidding fails on (the error is printed), up
+; to tries deals; nil when none of them is bid to a contract.
+(defun training-deal (role &optional (generator (lambda () (build full-random))) tries)
+    (loop for try from 1
+          while (or (null tries) (<= try tries))
+          do
+        (let* ((objs (funcall generator))
                (bids (handler-case (drain (make-instance 'bidding :deal objs))
                          (error (e)
                              (format t "~&[ERROR] bidding of ~A: ~A~%" (mapcar #'suits objs) e)
