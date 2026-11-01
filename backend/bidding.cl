@@ -1062,13 +1062,33 @@
                                                     opp-suits)))))
              ,@(if (< (car closest-nt) 2)
                    `(((2 NT) . (and (>= hcp 8) (<= hcp 17) (>= C 5) (>= D 5)))))))
-       ;; new suit overcalls (non-jump, legal)
-       (loop for s in '(C D H S)
+       ;; Michaels cue-bid (non-jump over opponent's suit), weak (8-11 or 7
+       ;; losers) or very strong (17+); with 12-16 we overcall naturally.
+       ;; Over a minor both majors, over a major the other one and a minor
+       ;; the opponents haven't bid
+       (if (and opp-suit (not (eq opp-suit 'nt)))
+           (let ((cue-bid (jump-bid opp-suit last-bid 0))
+                 (minors (list- '(C D) opp-suits :test #'eq)))
+             (if (or (find opp-suit '(C D)) minors)
+                 `((,cue-bid . (and (or (and (<= hcp 11) (or (>= hcp 8) (<= losers 7)))
+                                        (>= hcp 17))
+                                    ,@(if (find opp-suit '(C D))
+                                          '((>= H 5) (>= S 5))
+                                          `((>= ,(if (eq opp-suit 'H) 'S 'H) 5)
+                                            (or ,@(mapcar (lambda (m) `(>= ,m 5)) minors))))))))))
+       ;; new suit overcalls (non-jump, legal): the longest suit, the higher
+       ;; of equal ones; at the one level 7 losers do instead of 8 HCP
+       (loop for s in '(S H D C)
              for bid = (jump-bid s last-bid 0)
              when (and bid
                        (>= (bid-jump last-bid bid) 0)
                        (not (find s opp-suits :test #'eq)))
-             collect `(,bid . (and (>= hcp 8) (< hcp 18) (>= ,(suitsym (suitno s)) 5)
+             collect `(,bid . (and ,(if (= (first bid) 1) '(or (>= hcp 8) (<= losers 7)) '(>= hcp 8))
+                                   (< hcp 18)
+                                   (>= ,(suitsym (suitno s)) 5)
+                                   ,@(loop for lower in (rest (member s '(S H D C)))
+                                           unless (find lower opp-suits :test #'eq)
+                                           collect `(>= ,s ,lower))
                                    (or (>= ,(mksym s "power") 4) (>= hcp 12)))))
        ;; jump overcalls (weak)
        (loop for s in '(C D H S)
@@ -1079,14 +1099,6 @@
              collect `(,bid . (and (> hcp 5) (>= ,(mksym s "power") 5)
                                    (or (> losers 5) (< hcp 11))
                                    (= ,(suitsym (suitno s)) ,(if (find s '(C D)) 7 6)))))
-       ;; Michaels cue-bid (non-jump over opponent's suit)
-       (if opp-suit
-           (let ((cue-bid (jump-bid opp-suit last-bid 0)))
-             `((,cue-bid . (and (>= hcp 8) (<= hcp 16)
-                                ,@(if (eq opp-suit 'D)
-                                      '((>= H 5) (>= S 5))
-                                      `((>= ,(if (eq opp-suit 'H) 'S 'H) 5)
-                                        (or (>= C 5) (>= D 5)))))))))
        ;; takeout double (12-17 or 18+); strong double has no suit constraints
        (let ((double-rules
                (append
@@ -1096,6 +1108,28 @@
                       collect `(>= ,(suitsym (suitno s)) 3)))))
          `((X . (or (and (>= hcp 12) (<= hcp 17) ,@double-rules)
                     (>= hcp 18))))))))
+
+;; 1♦-P-1♥: 7 HCP, 7 losers and 5-5 in spades and clubs, Michaels showing
+;; spades and the minor left
+(test (choose-bid (str2hand "♠ KJ987 ♥ 65 ♦ 9 ♣ K8764") (simple-overcall '(1 H) '((1 D) (1 H))))
+      '(2 H) equal)
+(test (cdr (assoc '(2 H) (simple-overcall '(1 H) '((1 D) (1 H))) :test #'equal))
+      '(and (or (and (<= hcp 11) (or (>= hcp 8) (<= losers 7))) (>= hcp 17)) (>= S 5) (or (>= C 5)))
+      equal)
+;; 12-16 with 5-5 overcalls naturally, 17+ cue-bids
+(test (choose-bid (str2hand "♠ AKJ87 ♥ 65 ♦ 9 ♣ KQ764") (simple-overcall '(1 H) '((1 H))))
+      '(1 S) equal)
+(test (choose-bid (str2hand "♠ AKQ87 ♥ 5 ♦ A ♣ KQJ64") (simple-overcall '(1 H) '((1 H))))
+      '(2 H) equal)
+;; Over a minor Michaels shows both majors
+(test (choose-bid (str2hand "♠ KJ987 ♥ KJ876 ♦ 9 ♣ 5") (simple-overcall '(1 C) '((1 C))))
+      '(2 C) equal)
+;; 6 HCP with 7 losers overcalls a five-card suit
+(test (choose-bid (str2hand "♠ KQJ98 ♥ 6 ♦ 9432 ♣ 87") (simple-overcall '(1 H) '((1 H))))
+      '(1 S) equal)
+;; Six clubs and five spades: clubs, the longer suit
+(test (choose-bid (str2hand "♠ AQ1087 ♥ 5 ♦ 9 ♣ KQJ764") (simple-overcall '(1 H) '((1 H))))
+      '(2 C) equal)
 
 (defun game-hcp (suit) (if (find suit '(C D)) 27 25))
 
