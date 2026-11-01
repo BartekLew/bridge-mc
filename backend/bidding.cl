@@ -1184,13 +1184,41 @@
       equal)
 
 
-                  
-;; Competitive further-bid (new function for competitive auctions)
-(defun competitive-further-bid (our partner last-bid opp-bids)
+;; Negative doubles: partner opened a suit at the one level, RHO overcalled
+;; and we haven't bid. Our double shows four or more cards in each major
+;; nobody has bid (1♦-1♠-X: hearts, 1♣-1♦-X: both majors), or with none
+;; both minors nobody has bid (1♥-1♠-X); 6+ over a one-level overcall, 8+ at
+;; the two level, 10+ at the three level, with no fit for partner's major.
+;; It has no upper bound, so it forces opener when RHO passes.
+
+; Suits a negative double shows, partner having opened open-suit
+(defun negative-double-suits (open-suit opp-suits)
+    (flet ((unbid (suits) (remove-if (lambda (s) (or (eq s open-suit) (member s opp-suits))) suits)))
+        (or (unbid '(S H)) (unbid '(D C)))))
+
+; Rule of a negative double over last-bid (RHO's overcall), or nil
+(defun negative-double-rule (open-suit opp-suits last-bid)
+    (let ((suits (negative-double-suits open-suit opp-suits)))
+        (and suits (<= (first last-bid) 3)
+             `(and (>= hcp ,(case (first last-bid) (1 6) (2 8) (t 10)))
+                   ,@(mapcar (lambda (s) `(>= ,s 4)) suits)
+                   ,@(if (member open-suit '(H S)) `((< ,open-suit 3)))))))
+
+(test (negative-double-rule 'D '(S) '(1 S)) '(and (>= hcp 6) (>= H 4)) equal)
+(test (negative-double-rule 'C '(D) '(1 D)) '(and (>= hcp 6) (>= S 4) (>= H 4)) equal)
+(test (negative-double-rule 'H '(S) '(2 S)) '(and (>= hcp 8) (>= D 4) (>= C 4) (< H 3)) equal)
+
+;; Competitive further-bid (new function for competitive auctions); open-suit
+;; is partner's one-level opening when we haven't bid yet (negative doubles)
+(defun competitive-further-bid (our partner last-bid opp-bids &optional open-suit)
   (let* ((partner-min (min-hcp partner))
          (opp-suits (filter (curry #'neq 'nt) (mapcar #'second opp-bids)))
          (last-opp-suit (car (last opp-suits)))
          (partner-long-suits (longers partner))
+         (negative (and open-suit (not our)
+                        (find last-bid opp-bids :test #'equal)
+                        (neq (third last-bid) 'x)
+                        (negative-double-rule open-suit opp-suits last-bid)))
          (bid-scheme nil))
 
     (dolist (suit '(C D H S))
@@ -1278,8 +1306,8 @@
                                  ,@stopper-rules))
                  bid-scheme))))
 
-    ;; Takeout double (once)
-    (when (and (not our) opp-suits 
+    ;; Takeout double (once), unless it's a negative one
+    (when (and (not our) (not negative) opp-suits
                (neq (third last-bid) 'x)
                (find last-bid opp-bids :test #'equal))
       (let ((double-rules (if (not our)
@@ -1291,7 +1319,26 @@
         (push `(X . (and (>= hcp 10) ,@double-rules)) bid-scheme)))
 
 
-    (merge-bid-rules (reverse bid-scheme) last-bid opp-bids)))
+    ;; a negative double comes first: showing the major beats raising a minor or NT
+    (merge-bid-rules (append (if negative `((x . ,negative))) (reverse bid-scheme))
+                     last-bid opp-bids)))
+
+;; 1♦-1♠: four hearts and 11 points, a spade stopper too: a negative double
+(test (choose-bid (str2hand "♠ Q982 ♥ AQJ10 ♦ J53 ♣ 73")
+                  (competitive-further-bid nil
+                                           '(and (or (> hcp 11) (< losers 6)) (> losers 3) (< hcp 23)
+                                                 (>= D 4) (< H 5) (< S 5))
+                                           '(1 S) '((1 S)) 'D))
+      'x
+      eq)
+;; 1♣-1♦: both majors, 6 points
+(test (choose-bid (str2hand "♠ K1084 ♥ Q1093 ♦ 872 ♣ J5")
+                  (competitive-further-bid nil
+                                           '(and (or (> hcp 11) (< losers 6)) (> losers 3) (< hcp 23)
+                                                 (>= C 3) (< H 5) (< S 5))
+                                           '(1 D) '((1 D)) 'C))
+      'x
+      eq)
 
 (test (choose-bid (str2hand "♣ AJ95 ♦ 72 ♥ Q107 ♠ A1095")
                   (competitive-further-bid '(and (>= hcp 6) (>= S 4))
@@ -1476,6 +1523,87 @@
                  (doubler-rebids (first ours) (find-if #'consp (reverse (subseq bids 0 (- n 2))))
                                  last-bid opp-suits)))))
 
+; Suit of partner's one-level suit opening when this is our first call after
+; it (bids from the dealer), else nil
+(defun partner-opening-suit (bids)
+    (let* ((i0 (position-if #'identity bids))
+           (open (and i0 (nth i0 bids))))
+        (and i0 (= (- (length bids) i0) 2)
+             (consp open) (= (first open) 1) (neq (second open) 'nt)
+             (second open))))
+
+(test (partner-opening-suit '(nil (1 D) (1 S))) 'D eq)
+(test (partner-opening-suit '((1 D) (1 S) x nil)) nil eq)
+
+;; Opener's rebid after partner's negative double (1♦-1♠-X-P): forced when
+;; RHO passed. With 18+ a cue-bid; raises of the suit partner showed with
+;; four cards (game 19+, jump 16-18, cheapest a minimum); NT with a stopper
+;; (jump 18-19, cheapest 12-14 at the one level, 15-17 at two); a new
+;; four-card suit; a jump rebid with six cards and 16-18; the cheapest
+;; rebid with five (six of a major). Forced with nothing else, he rebids his
+;; suit.
+(defun negative-double-rebids (open-suit last-bid opp-suits forced)
+    (let* ((shown (negative-double-suits open-suit opp-suits))
+           (opp (car (last opp-suits)))
+           (stoppers (stopper-rules opp-suits))
+           (new-suits (remove-if (lambda (s) (or (eq s open-suit) (member s shown) (member s opp-suits)))
+                                 '(S H D C)))
+           (rebid-len (if (member open-suit '(H S)) 6 5)))
+        (flet ((bid (s levels) (jump-bid s last-bid levels))
+               (below-game (b s) (and b (< (first b) (first (game-in s))))))
+            (remove-if-not #'car
+                (append
+                    (if opp `((,(bid opp 0) . (>= hcp 18))))
+                    (loop for s in shown
+                          for best = (best-suit-rules s shown)
+                          append `((,(game-in s) . (and (>= hcp 19) (>= ,s 4) ,@best))
+                                   ,@(if (below-game (bid s 1) s)
+                                         `((,(bid s 1) . (and (>= hcp 16) (<= hcp 18) (>= ,s 4) ,@best))))
+                                   ,@(if (below-game (bid s 0) s)
+                                         `((,(bid s 0) . (and (<= hcp 15) (>= ,s 4) ,@best))))))
+                    (if (<= (first (bid 'nt 1)) 3)
+                        `((,(bid 'nt 1) . (and (>= hcp 18) (<= hcp 19) ,@stoppers))))
+                    `((,(bid 'nt 0) . ,(if (= (first (bid 'nt 0)) 1)
+                                           `(and (<= hcp 14) ,@stoppers)
+                                           `(and (>= hcp 15) (<= hcp 17) ,@stoppers))))
+                    (if (below-game (bid open-suit 1) open-suit)
+                        `((,(bid open-suit 1) . (and (>= hcp 16) (<= hcp 18) (>= ,open-suit 6)))))
+                    (loop for s in new-suits
+                          collect `(,(bid s 0) . (and (<= hcp 17) (>= ,s 4) ,@(best-suit-rules s new-suits))))
+                    `((,(bid open-suit 0) . (and (<= hcp 15) (>= ,open-suit ,rebid-len))))
+                    (if forced `((,(bid open-suit 0) . (>= hcp 0)))))))))
+
+;; 1♦-1♠-X-P: three hearts, no spade stopper, four clubs: 2♣
+(test (choose-bid (str2hand "♠ J4 ♥ K93 ♦ A742 ♣ AJ102") (negative-double-rebids 'D '(1 S) '(S) t))
+      '(2 C) equal)
+;; four hearts and a minimum: 2♥
+(test (choose-bid (str2hand "♠ J4 ♥ K932 ♦ A742 ♣ AJ2") (negative-double-rebids 'D '(1 S) '(S) t))
+      '(2 H) equal)
+;; a spade stopper and a minimum: 1NT
+(test (choose-bid (str2hand "♠ KJ4 ♥ K93 ♦ A742 ♣ J102") (negative-double-rebids 'D '(1 S) '(S) t))
+      '(1 NT) equal)
+;; nothing else: 2♦, forced
+(test (choose-bid (str2hand "♠ 864 ♥ K93 ♦ AK72 ♣ AJ2") (negative-double-rebids 'D '(1 S) '(S) t))
+      '(2 D) equal)
+
+; Scheme of the opener after partner's negative double, from bids (from the
+; dealer); else nil
+(defun negative-double-scheme (bids)
+    (let* ((i0 (position-if #'identity bids))
+           (open (and i0 (nth i0 bids)))
+           (over (and i0 (nth (+ i0 1) bids)))
+           (rho (and i0 (nth (+ i0 3) bids))))
+        (when (and i0 (= (- (length bids) i0) 4)
+                   (consp open) (= (first open) 1) (neq (second open) 'nt)
+                   (consp over) (neq (second over) 'nt) (<= (first over) 3)
+                   (eq (nth (+ i0 2) bids) 'x))
+            (let ((opp-suits (remove-duplicates
+                               (cons (second over) (if (and (consp rho) (neq (second rho) 'nt))
+                                                       (list (second rho)))))))
+                (and (negative-double-suits (second open) (list (second over)))
+                     (negative-double-rebids (second open) (if (consp rho) rho over) opp-suits
+                                             (null rho)))))))
+
 ;; Bidding scheme selection based on bidding sequence (history-aware).
 (defun bidding-scheme-for (bids meanings)
     (let* ((merged-bids (merge-double bids))
@@ -1485,6 +1613,7 @@
                             collect (nth i merged-bids))))
       (cond
         ((takeout-double-scheme bids))
+        ((negative-double-scheme bids))
         ((some #'identity opps-bids)
           ;; competitive first overcall case
           (let ((opp-bids (remove nil (loop for i from (- (length merged-bids) 1) downto 0 by 2
@@ -1493,7 +1622,8 @@
             (cond ((and (not (filter #'identity our-bids)) (<= (length our-bids) 3))
                      (simple-overcall last-bid opp-bids))
                   ((filter #'identity our-bids)
-                    (competitive-further-bid (first meanings) (third meanings) last-bid opp-bids)))))
+                    (competitive-further-bid (first meanings) (third meanings) last-bid opp-bids
+                                             (partner-opening-suit bids))))))
         ;; Our one sided bidding case:
         (t
           (let* ((active-bids (remove nil merged-bids))
