@@ -235,17 +235,9 @@ E: ♣ Q5 ♦ J9762 ♥ Q ♠ J6543
 S: ♣ 432 ♦ 1043 ♥ K10954 ♠ 87
 W: ♣ A1087 ♦ KQ5 ♥ 762 ♠ Q102")))
 
-; The computer plays a whole deal legally; with declarer's seats left to the
-; player (S declaring) it stops after the opening lead
-(test (let ((cards (computer-plays *training-hands* 2 2 nil nil))
-            (h *training-hands*))
-          (multiple-value-bind (left done) (training-position *training-hands* 2 2 cards)
-              (and (= (length done) 13)
-                   (every #'null (apply #'append left))
-                   (loop for (tr leader) in done
-                         always (legal-trick? h leader tr)
-                         do (setf h (play-trick h leader tr))))))
-      t eq)
+; The computer plays a whole deal legally (tested in slow-tests.cl); with
+; declarer's seats left to the player (S declaring) it stops after the
+; opening lead
 (test (length (computer-plays *training-hands* 2 2 nil '(2 0))) 1 eql)
 
 ; Play of cards from the opening lead as an outcome of play-deal, for

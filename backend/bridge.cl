@@ -1091,11 +1091,7 @@
                                                 (possible-lc-lens permut lc-supply len)))
                              permut)))))
 
-(file-based-test "test/distgen-test.dat"
-  (let ((it (make-instance 'distgen :c '(5 nil) :d '(0 4) :h '(0 1) :hcp '(10 15) )))
-    (loop for x = (next it)
-          while x
-          do (test-next x))))
+; distgen's file-based test is in slow-tests.cl
 
 (defun dist-from-hc (hc-distrib lc-supply len)
     (let* ((permuts (possible-lc-lens hc-distrib lc-supply len))
@@ -1841,14 +1837,8 @@
                                                  (mapcar (f* #'pretty-tree #'unhand) remaining))
                                           (all-cards)))))))
 
-; Hands are dealt one after another, so the cards a hand takes may leave none
-; that fit a later one (here N's honours S's suit points): such deals are
-; dealt again
-(test (let ((d (make-instance 'deal :~ '((:hcp (15 17) :s (2 4) :h (2 4) :d (2 4) :c (2 4))
-                                         nil
-                                         (:hcp (8 10) :h (5 nil (3 nil)) :d (4 nil (4 nil)))))))
-          (loop repeat 200 always (= (length (build d)) 4)))
-      t eq)
+; Dealing again when a later hand doesn't fit the cards left: tested in
+; slow-tests.cl
 
 (defmethod take-card ((this hand) card)
     (list card (make-instance 'hand := (loop for suit from 0 to 4
