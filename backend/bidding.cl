@@ -268,6 +268,71 @@
       ((,base-level S) . (>= S 4))
       ((,base-level D) . (and (< H 4) (< S 4))))))
 
+;; Transfers: over 1NT (2NT) responder's 2D (3D) shows 5+ hearts, 2H (3H) 5+
+;; spades. Opener completes the transfer; responder then passes when weak,
+;; invites (over 1NT only) by 2NT with exactly five cards or by three of the
+;; suit with six, and bids game by 3NT with five (opener choosing) or in the
+;; suit with six. Opener judging an invitation counts 2 points for each
+;; trump beyond an 8-card fit: with 16 he bids game.
+
+; Suit a transfer bid over nt (1NT or 2NT) shows, or nil
+(defun transfer-suit (nt bid)
+    (and (= (first bid) (+ (first nt) 1))
+         (cdr (assoc (second bid) '((D . H) (H . S))))))
+
+; Responder's rebids after opener completed his transfer to suit over level NT
+(defun transfer-rebids (level suit)
+    (let ((game (if (= level 1) 10 4)))
+        `(,@(if (= level 1)
+                `(((2 NT) . (and ,(range 'hcp '(8 9)) (= ,suit 5)))
+                  ((3 ,suit) . (and ,(range 'hcp '(8 9)) (>= ,suit 6)))))
+          ((4 ,suit) . (and (>= hcp ,game) (>= ,suit 6)))
+          ((3 NT) . (and (>= hcp ,game) (= ,suit 5))))))
+
+; Opener's answers to responder's invitation after a transfer to suit, he
+; having shown shown cards (5 by 2NT, 6 by three of the suit): game with a
+; maximum, counting extra trumps; over 2NT three of the suit with a fit,
+; else pass
+(defun transfer-invite-answers (suit shown)
+    (let ((fit (- 8 shown)))
+        `(((4 ,suit) . (and (>= ,suit ,fit) (>= (+ hcp (* 2 (- ,suit ,fit))) 16)))
+          ,@(when (= shown 5)
+                `(((3 NT) . (and (< ,suit ,fit) (>= hcp 16)))
+                  ((3 ,suit) . (>= ,suit ,fit)))))))
+
+; Bidding scheme of an uncontested transfer auction: active-bids (1NT or
+; 2NT, a transfer and what followed) as (scheme), the scheme nil when the
+; side passes; nil when it isn't one
+(defun transfer-scheme (active-bids)
+    (let* ((nt (first active-bids))
+           (suit (and (member nt '((1 NT) (2 NT)) :test #'equal) (second active-bids)
+                      (transfer-suit nt (second active-bids))))
+           (level (first nt))
+           (rest (cddr active-bids)))
+        (when suit
+            (cond ((null rest) (list `(((,(+ level 1) ,suit) . (>= hcp 0)))))
+                  ((null (cdr rest)) (list (transfer-rebids level suit)))
+                  ((cddr rest) (list nil))
+                  (t (let ((rebid (second rest)))
+                        (list (cond ((equal rebid '(2 NT)) (transfer-invite-answers suit 5))
+                                    ((equal rebid (list 3 suit)) (transfer-invite-answers suit 6))
+                                    ((equal rebid '(3 NT)) `(((4 ,suit) . (>= ,suit 3))))
+                                    (t nil)))))))))
+
+(test (choose-bid (str2hand "♠ 96 ♥ A9752 ♦ KJ103 ♣ 75") (transfer-rebids 1 'H)) '(2 NT) equal)
+(test (choose-bid (str2hand "♠ 96 ♥ A97532 ♦ KJ10 ♣ 75") (transfer-rebids 1 'H)) '(3 H) equal)
+(test (choose-bid (str2hand "♠ 96 ♥ A97532 ♦ KJ10 ♣ K5") (transfer-rebids 1 'H)) '(4 H) equal)
+(test (choose-bid (str2hand "♠ 96 ♥ A9752 ♦ KJ103 ♣ K5") (transfer-rebids 1 'H)) '(3 NT) equal)
+(test (choose-bid (str2hand "♣ 10 ♦ J42 ♥ Q10854 ♠ 10764") (transfer-rebids 1 'H)) nil equal)
+; 16 HCP and a 9-card fit: a maximum, game
+(test (choose-bid (str2hand "♠ AQ5 ♥ KJ83 ♦ Q954 ♣ KJ") (transfer-invite-answers 'H 5)) '(4 H) equal)
+; 15 HCP and an 8-card fit: three of the suit
+(test (choose-bid (str2hand "♠ AQ5 ♥ K83 ♦ Q954 ♣ KJ4") (transfer-invite-answers 'H 5)) '(3 H) equal)
+; 15 HCP and a doubleton: pass
+(test (choose-bid (str2hand "♠ AQ54 ♥ K8 ♦ Q954 ♣ KJ4") (transfer-invite-answers 'H 5)) nil equal)
+; 15 HCP and four trumps opposite six: 15 + 4, game
+(test (choose-bid (str2hand "♠ AQ5 ♥ K832 ♦ Q95 ♣ KJ4") (transfer-invite-answers 'H 6)) '(4 H) equal)
+
 ;; Responder's rebids after opener answers 2H/3H to Stayman (1NT/2NT context).
 ;; Covers:
 ;; - Fit in hearts: invite (3H) with 8-9 HCP, bid game (4H) with 10-15 HCP.
@@ -1368,10 +1433,12 @@
                     (competitive-further-bid (first meanings) (third meanings) last-bid opp-bids)))))
         ;; Our one sided bidding case:
         (t
-          (let ((active-bids (remove nil merged-bids))
-                (our (nth 0 meanings))
-                (partner (nth 2 meanings)))
+          (let* ((active-bids (remove nil merged-bids))
+                 (our (nth 0 meanings))
+                 (partner (nth 2 meanings))
+                 (transfer (transfer-scheme active-bids)))
             (cond ((not active-bids) openings)
+                  (transfer (first transfer))
                   ((equal active-bids '((1 NT))) (nt-responses 1))
                   ((equal active-bids '((2 NT))) (nt-responses 2))
                   ((and (= (length active-bids) 1) (eq (seektree '(0 0) active-bids) 1))
@@ -1466,6 +1533,16 @@
                                 (str2hand "S: ♠ J10852 ♥ 10 ♦ AQ9 ♣ AJ43")
                                 (str2hand "W: ♠ 3 ♥ AQ9 ♦ 832 ♣ KQ8752"))))
       '(nil nil (1 S) (2 C) (3 C) nil (4 S) nil nil nil)
+      equal)
+
+;; A transfer completed, responder invites by 2NT with five hearts; opener,
+;; 16 with four of them, bids game
+(test (drain (make-instance 'bidding
+                    :deal (list (str2hand "N: ♠ AQ5 ♥ KJ83 ♦ Q954 ♣ KJ")
+                                (str2hand "E: ♠ J1082 ♥ 6 ♦ 87 ♣ AQ10943")
+                                (str2hand "S: ♠ 96 ♥ A9752 ♦ KJ103 ♣ 75")
+                                (str2hand "W: ♠ K743 ♥ Q104 ♦ A62 ♣ 862"))))
+      '((1 NT) nil (2 D) nil (2 H) nil (2 NT) nil (4 H) nil nil nil)
       equal)
 
 ;; Partner answers a takeout double; the doubler shows 18+ with a new suit
