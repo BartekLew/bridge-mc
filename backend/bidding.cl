@@ -145,7 +145,10 @@
                                  (>= H 5) (< S 5)))
                    ((1 D) . (and (or (< losers 6) (> hcp 11))
                                  (> losers 3) (< hcp 23)
-                                 (>= D 4) (>= D C) (< H 5) (< S 5)))
+                                 (>= D 4) (< H 5) (< S 5)
+                                 ;; 5+ diamonds (no reverses yet), more diamonds
+                                 ;; than clubs, or 4-4 with stronger diamonds
+                                 (or (>= D 5) (> D C) (and (= C 4) (> Dpower Cpower)))))
                    ((1 C) . (and (or (< losers 6) (> hcp 11))
                                  (> losers 3) (< hcp 23)
                                  (>= C 3) (< H 5) (< S 5)))
@@ -213,6 +216,10 @@
 (test (choose-bid (str2hand "♣ K103 ♦ 102 ♥ AKJ10862 ♠ J")) '(1 H) equal)
 (test (choose-bid (str2hand "♣ AKQ10952 ♦ Q63 ♥ 9 ♠ K2")) '(1 C) equal)
 (test (choose-bid (str2hand "♣ A95 ♦ 83 ♥ A4 ♠ 1076543")) nil equal)
+(test (choose-bid (str2hand "♠ 532 ♥ 83 ♦ AQ102 ♣ AQJ2")) '(1 C) equal) ; 4-4, clubs stronger
+(test (choose-bid (str2hand "♠ 532 ♥ 83 ♦ AQJ2 ♣ AQ102")) '(1 D) equal) ; 4-4, diamonds stronger
+(test (choose-bid (str2hand "♠ 53 ♥ 83 ♦ AQ1032 ♣ AQJ2")) '(1 D) equal) ; 5 diamonds
+(test (choose-bid (str2hand "♠ 5 ♥ 83 ♦ AQ1032 ♣ AQJ32")) '(1 D) equal) ; 5-5, diamonds
 
 ;; Helper: build (and (>= value min) (<= value max)) form for use in tables.
 (defun range (value range)
