@@ -845,8 +845,11 @@
                                       (t 3)))
                    ,@(if (= free-levels 2)
                          `(,(grade (jump-bid suit last-bid 1) (+ my-min 6) nil)))
+                   ;; partner with no upper bound forces: the cheapest NT
+                   ;; shows no more than we did; when he is limited it shows
+                   ;; a surplus. A raise or preference in his suit never does
                    ,@(if (>= free-levels 1)
-                         (if (or max-hcp (eq suit (second last-bid)))
+                         (if (or (not max-hcp) (not (eq suit 'nt)))
                              `(,(grade (jump-bid suit last-bid 0) my-min nil))
                              `(,(grade (jump-bid suit last-bid 0) (+ my-min 3) nil))))))))))
 
@@ -897,13 +900,15 @@
                   for prev-len = (find-in-bid our-shape (curry #'match-greater s))
                   when prev-len
                   collect
-                    (let* ((min-extra (+ prev-len 1))
+                    (let* ((min-extra (max (+ prev-len 1) 5)) ; 1♣ (3+) rebid: 5+
                            (cheap (closest-bid s last-bid))
                            (jump (jump-bid s last-bid 1))
+                           ;; the cheapest rebid shows a minimum (1♥-1NT-2♥:
+                           ;; 12-15), forcing or not; the jump more
                            (cheap-rule (build-and `(>= ,s ,min-extra)
-                                                  (if my-min `(<= hcp ,(+ my-min 5)))))
+                                                  (if my-min `(<= hcp ,(+ my-min 3)))))
                            (jump-rule (build-and `(>= ,s ,min-extra)
-                                                 (if my-min `(>= hcp ,(+ my-min 6))))))
+                                                 (if my-min `(>= hcp ,(+ my-min 4))))))
                       (remove nil
                         (list (and jump-rule (cons jump jump-rule))
                               (and cheap-rule (cons cheap cheap-rule)))))))))))
@@ -976,6 +981,23 @@
                                '(and (>= hcp 8) (<= hcp 14) (>= h 4))
                                '(3 NT)))
       nil
+      equal)
+
+;; Partner's new suit, 6+ with no upper bound, forces: a minimum rebids 1NT
+(test (choose-bid (str2hand "♠ 532 ♥ 83 ♦ AQ102 ♣ AQJ2")
+                  (further-bid '(and (or (> hcp 11) (< losers 6)) (> losers 3) (< hcp 23)
+                                     (>= C 3) (< H 5) (< S 5))
+                               '(and (>= hcp 6) (>= H 4))
+                               '(1 H)))
+      '(1 NT)
+      equal)
+
+;; 1♥-1NT-2♥ shows a minimum (12-15) with six hearts
+(test (choose-bid (str2hand "♠ K5 ♥ AQ10974 ♦ K83 ♣ 52")
+                  (further-bid '(and (>= hcp 12) (<= hcp 22) (>= H 5))
+                               '(and (>= hcp 6) (<= hcp 10) (< S 4))
+                               '(1 NT)))
+      '(2 H)
       equal)
 
 ;; Complement of a list of bid rules (used for Pass meanings).
