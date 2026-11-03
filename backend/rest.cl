@@ -17,7 +17,8 @@
 (with-compilation-unit ()
     (load "bridge.cl")
     (load "compscore.cl")
-    (load "training.cl"))
+    (load "training.cl")
+    (load "grading.cl"))
 (ql:quickload '(:clack :clack-cors :jonathan :flexi-streams))
 
 (defclass table ()
@@ -676,6 +677,76 @@
     (loop for s from 3 downto 0
           append (mapcar (lambda (r) (cardstr (list s r))) (reverse (nth s suits)))))
 
+;; Graded bidding debugger (grading.html)
+; A hand's measures, its opening by the legacy rules (choose-bid) and by the
+; scheme (graded-scheme), and the grade of each bid of the scheme with its
+; rule, as texts gives it (in scheme order), and the rule's trace (grade-trace)
+(defun grade-view (hand scheme texts)
+    (let ((m (hand-measures hand)))
+        `(:hand ,(hand-formula (list (suits hand)) 0)
+          :measures ,(loop for (key . val) in m
+                           append (list (intern (string key) :keyword) val))
+          :legacy ,(call-str (choose-bid hand))
+          :best ,(call-str (best-graded m scheme))
+          :grades ,(loop for (bid . grade) in (graded-bids m scheme)
+                         for (nil . rule) in scheme
+                         for text in texts
+                         collect `(:bid ,(call-str bid) :grade ,(float grade) :rule ,text
+                                   :trace ,(grade-trace rule m))))))
+
+; Saves a rule edited in the debugger, {bid, rule} (bid as call-str, rule as
+; Lisp text), to the scheme file
+(defun save-edited-rule (edit)
+    (let* ((name (getf edit :|bid|))
+           (entry (or (find name (scheme-file-entries) :key (lambda (e) (call-str (first e)))
+                                                        :test #'string=)
+                      (edit-error "No bid ~A in ~A" name *scheme-file*))))
+        (handler-case (save-rule (first entry) (getf edit :|rule|))
+            (error (e) (edit-error "Bad rule for ~A: ~A" name e)))))
+
+; Deals for the debugger's ranges too tight for random hands (def-hand),
+; kept by def: a deal makes its generator once, slowly (seconds), so
+; batches for the same ranges reuse it
+(defvar *grade-deals* (make-hash-table :test #'equal :synchronized t))
+
+(defun grade-deal (def)
+    (or (gethash def *grade-deals*)
+        (setf (gethash def *grade-deals*)
+              (handler-case (make-instance 'deal :~ (list (normdef (read-from-string def))))
+                  (error (e) (edit-error "Bad ranges ~A: ~A" def e))))))
+
+; POST /api/grade with a hand as HandEditor's restDef gives it: {hand} the
+; hand's grade-view, {def, count?} (ranges) {HANDS} of count hands (10, at
+; most 100) dealt for them,
+; {hands} (formulas) {HANDS} of these hands, graded again. An optional rule,
+; {bid, rule}, is saved to the scheme file first; given alone, the answer is
+; {SAVED: true}.
+(defun grade-request (request)
+    (let ((hand (getf request :|hand|))
+          (hands (getf request :|hands|))
+          (def (getf request :|def|))
+          (edit (getf request :|rule|)))
+        (when edit (save-edited-rule edit))
+        (let* ((entries (handler-case (scheme-file-entries)
+                          (error (e) (edit-error "Cannot read ~A: ~A" *scheme-file* e))))
+               (scheme (mapcar (lambda (e) (cons (first e) (second e))) entries))
+               (str (file-string *scheme-file*))
+               (texts (mapcar (lambda (e) (subseq str (third e) (fourth e))) entries)))
+        (flet ((read-hand (str) (handler-case (str2hand str)
+                                  (error (e) (edit-error "Bad hand ~A: ~A" str e))))
+               (grade-view (hand) (grade-view hand scheme texts)))
+            (cond (hand (grade-view (read-hand hand)))
+                  (hands `(:hands ,(mapcar (lambda (h) (grade-view (read-hand h))) hands)))
+                  (def (let ((ranges (handler-case (normdef (read-from-string def))
+                                         (error (e) (edit-error "Bad ranges ~A: ~A" def e)))))
+                         `(:hands ,(loop repeat (min 100 (or (getf request :|count|) 10))
+                                         collect (grade-view
+                                                  (or (def-hand ranges)
+                                                      (first (handler-case (build (grade-deal def))
+                                                                 (error (e) (edit-error "Cannot deal ~A: ~A" def e))))))))))
+                  (edit '(:saved t))
+                  (t (edit-error "Neither a hand nor ranges given")))))))
+
 (defun load-training (id)
     (let ((str (load-sim id *training-dir*)))
         (and str (jonathan:parse str))))
@@ -1284,6 +1355,8 @@
                                           (getf request :|tricks|))))))
       ((string= path "/api/train")
        (edit-endpoint env (lambda (request) (training-new (getf request :|role|) (getf request :|defs|)))))
+      ((string= path "/api/grade")
+       (edit-endpoint env #'grade-request))
       ((and (substr= "/api/train/" path) (search "/play" path))
        (let ((id (subseq path (length "/api/train/") (search "/play" path))))
           (edit-endpoint env (lambda (request) (training-play id (getf request :|card|))))))

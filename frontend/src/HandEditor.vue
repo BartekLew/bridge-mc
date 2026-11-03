@@ -22,14 +22,24 @@ import { ref, computed } from 'vue'
 import { suits, ranks } from './play.js'
 import { HandMode } from './hands.js'
 
-const props = defineProps({ hands: Object });
+// With apply (a label), its button emits apply with the edited hand instead
+// of pushing it; disabled disables it
+const props = defineProps({ hands: Object, apply: String, disabled: Boolean });
+const emit = defineEmits(['apply']);
 
 const edited = computed(() => props.hands.edited());
 
 const suitIndex = ref(0)
 const currentSuit = computed(() => suits[suitIndex.value])
 
+const canPush = computed(() => !props.disabled
+    && (props.apply ? edited.value.isValid() : props.hands.canPush()));
+
 function pushHand() {
+    if(props.apply) {
+        emit('apply', edited.value);
+        return;
+    }
     props.hands.push();
     suitIndex.value = 0;
 }
@@ -136,14 +146,14 @@ const formula = computed(() => edited.value.formula());
       <!-- Push button -->
       <button
         @click="pushHand"
-        :disabled="!hands.canPush()"
+        :disabled="!canPush"
         class="mt-4 w-full py-2 rounded-xl font-semibold"
         :class="{
-            'bg-gray-500': !hands.canPush(),
-            'bg-red-200 hover:bg-red-300': hands.canPush()
+            'bg-gray-500': !canPush,
+            'bg-red-200 hover:bg-red-300': canPush
         }"
       >
-        Push
+        {{ apply || 'Push' }}
       </button>
     </div>
 </template>
