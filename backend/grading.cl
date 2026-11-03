@@ -33,15 +33,29 @@
 ;   (not x) 1 - x
 ; - comparisons (< <= > >= =) are 1 or 0, + - / are arithmetic
 
-;; Measures of a hand by name, as grade expressions use them
+;; Measures of a hand by name, as grade expressions use them. long and
+;; second are the lengths of the longest and second-longest suits,
+;; longpower the points in the longest (on a tie, the stronger).
 (defun hand-measures (hand)
     (destructuring-bind (lens power losers stops) (assess-hand hand)
-        (append (mapcar #'cons '(C D H S) lens)
-                (mapcar #'cons '(Cpower Dpower Hpower Spower) power)
-                (mapcar #'cons '(Cstop Dstop Hstop Sstop) stops)
-                `((hcp . ,(apply #'+ power))
-                  (losers . ,losers)
-                  (balanced . ,(if (balanced? lens power losers stops) 1 0))))))
+        (let ((by-length (sort (mapcar #'list lens power) #'>
+                               :key (lambda (x) (+ (* 100 (first x)) (second x))))))
+            (append (mapcar #'cons '(C D H S) lens)
+                    (mapcar #'cons '(Cpower Dpower Hpower Spower) power)
+                    (mapcar #'cons '(Cstop Dstop Hstop Sstop) stops)
+                    `((hcp . ,(apply #'+ power))
+                      (losers . ,losers)
+                      (balanced . ,(if (balanced? lens power losers stops) 1 0))
+                      (long . ,(first (first by-length)))
+                      (second . ,(first (second by-length)))
+                      (longpower . ,(second (first by-length))))))))
+
+; 6-6 with spades stronger; 5-4 with the 5 carrying the points
+(test (loop for str in '("♠ AQ8762 ♥ 3 ♦ KJ9532 ♣ " "♠ 432 ♥ AKQ32 ♦ 5432 ♣ 4")
+            collect (let ((m (hand-measures (str2hand str))))
+                      (mapcar (lambda (k) (cdr (assoc k m))) '(long second longpower))))
+      '((6 6 6) (5 4 9))
+      equal)
 
 ;; x against the model lo..hi (nil: no bound), losing blur-below for each
 ;; point below lo and blur-above for each point above hi, floored at 0

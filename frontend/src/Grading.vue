@@ -235,6 +235,9 @@ const vFocus = { mounted: (el) => el.focus() };
                 <tr><td class="pr-2 text-gray-500">HCP</td><td>{{ view['MEASURES']['HCP'] }}</td>
                     <td class="pl-4 pr-2 text-gray-500">losers</td><td>{{ view['MEASURES']['LOSERS'] }}</td>
                     <td class="pl-4 pr-2 text-gray-500">balanced</td><td>{{ view['MEASURES']['BALANCED'] }}</td></tr>
+                <tr><td class="pr-2 text-gray-500">long</td><td>{{ view['MEASURES']['LONG'] }}</td>
+                    <td class="pl-4 pr-2 text-gray-500">second</td><td>{{ view['MEASURES']['SECOND'] }}</td>
+                    <td class="pl-4 pr-2 text-gray-500">longpower</td><td>{{ view['MEASURES']['LONGPOWER'] }}</td></tr>
                 <tr v-for="suit in suits" :key="suit">
                   <td class="pr-2" :style="{ color: suitColors[suit] }">{{ suit }}</td>
                   <td>{{ view['MEASURES'][suitLetters[suit]] }} cards</td>
