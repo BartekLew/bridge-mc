@@ -747,6 +747,111 @@
                   (edit '(:saved t))
                   (t (edit-error "Neither a hand nor ranges given")))))))
 
+;; Measuring the graded openings in the debugger: a job deals count random
+;; hands in a thread and keeps each with its graded bid and measures, so the
+;; page can ask for the statistics while it runs and list a bid's hands.
+(defstruct gjob
+    total (done 0) scheme (stop nil) (state "running") (error nil)
+    (records (make-array 1000 :adjustable t :fill-pointer 0))   ; (bid hand measures)
+    (lock (sb-thread:make-mutex :name "grade job")))
+
+(defvar *grade-jobs* (make-hash-table :test #'equal :synchronized t))
+(defvar *grade-job-count* 0)
+
+; Measures in the statistics, in the order shown
+(defparameter *gjob-measures*
+    '(hcp losers long second longpower balanced C D H S Cpower Dpower Hpower Spower))
+
+(defun gjob-start (count)
+    (let* ((count (max 1 (min 1000000 (or count 10000))))
+           (job (make-gjob :total count :scheme (handler-case (graded-scheme)
+                                                  (error (e) (edit-error "Cannot read ~A: ~A" *scheme-file* e)))))
+           (id (princ-to-string (incf *grade-job-count*))))
+        (setf (gethash id *grade-jobs*) job)
+        (remhash (princ-to-string (- *grade-job-count* 5)) *grade-jobs*)
+        (sb-thread:make-thread
+         (lambda ()
+             (handler-case
+                 (loop until (or (gjob-stop job) (>= (gjob-done job) count))
+                       do (dolist (hand (random-deal))
+                              (when (< (gjob-done job) count)
+                                  (let ((m (hand-measures hand)))
+                                      (sb-thread:with-mutex ((gjob-lock job))
+                                          (vector-push-extend (list (best-graded m (gjob-scheme job)) hand m)
+                                                              (gjob-records job))
+                                          (incf (gjob-done job)))))))
+               (error (e) (setf (gjob-error job) (princ-to-string e))))
+             (setf (gjob-state job) (if (gjob-stop job) "stopped" "done")))
+         :name "grade measure")
+        `(:id ,id)))
+
+(defun gjob-records-now (job)
+    (sb-thread:with-mutex ((gjob-lock job))
+        (copy-seq (gjob-records job))))
+
+; Statistics of each bid of the scheme chosen by some hand: its count and
+; share, and for each measure its least, greatest and mean value and the
+; share of each value
+(defun gjob-stats (job)
+    (let* ((records (gjob-records-now job))
+           (n (length records))
+           (by-bid (make-hash-table :test #'equal)))
+        (loop for r across records do (push (third r) (gethash (first r) by-bid)))
+        `(:state ,(gjob-state job) :done ,n :total ,(gjob-total job)
+          ,@(and (gjob-error job) `(:error ,(gjob-error job)))
+          :bids ,(loop for (bid) in (gjob-scheme job)
+                       for ms = (gethash bid by-bid)
+                       when ms
+                       collect `(:bid ,(call-str bid) :count ,(length ms) :share ,(float (/ (length ms) n))
+                                 :measures ,(loop for key in *gjob-measures*
+                                                  collect (measure-stats key ms)))))))
+
+(defun measure-stats (key measures)
+    (let ((counts (make-hash-table)) (sum 0) (lo nil) (hi nil) (n (length measures)))
+        (dolist (m measures)
+            (let ((v (cdr (assoc key m))))
+                (incf (gethash v counts 0))
+                (incf sum v)
+                (setf lo (if lo (min lo v) v) hi (if hi (max hi v) v))))
+        `(:name ,(if (= 1 (length (string key))) (string key) (string-downcase key))
+          :min ,lo :max ,hi :mean ,(float (/ sum n))
+          :probs ,(sort (loop for v being the hash-keys of counts using (hash-value c)
+                              collect (list v (float (/ c n))))
+                        #'< :key #'first))))
+
+; Hands of the job graded bid (call-str, or null for all hands) for which
+; filter, a grade expression (text, empty for none), grades 1 or more: their
+; count and the first limit of them
+(defun gjob-hands (job bid filter &optional (limit 200))
+    (let* ((test (and filter (string/= "" (string-trim '(#\Space #\Tab #\Newline) filter))
+                      (handler-case (parse-rule filter)
+                          (error (e) (edit-error "Bad filter: ~A" e)))))
+           (matches (loop for (b hand m) across (gjob-records-now job)
+                          when (and (or (null bid) (string= bid (call-str b)))
+                                    (or (null test) (>= (grade test m) 1)))
+                          collect (list b hand m))))
+        `(:count ,(length matches)
+          :hands ,(loop for (b hand m) in matches
+                        repeat limit
+                        collect `(:hand ,(hand-formula (list (suits hand)) 0) :best ,(call-str b)
+                                  :hcp ,(cdr (assoc 'hcp m)) :losers ,(cdr (assoc 'losers m)))))))
+
+(defun gjob-request (path request)
+    ; path after /api/grade/measure: "" starts, "/<id>" stats, "/<id>/hands", "/<id>/stop"
+    (if (string= path "")
+        (gjob-start (getf request :|count|))
+        (let* ((parts (loop for start = 1 then (1+ end)
+                            for end = (position #\/ path :start start)
+                            collect (subseq path start end)
+                            while end))
+               (job (or (gethash (first parts) *grade-jobs*)
+                        (edit-error "No measuring job ~A" (first parts)))))
+            (cond ((null (second parts)) (gjob-stats job))
+                  ((string= (second parts) "hands")
+                   (gjob-hands job (getf request :|bid|) (getf request :|filter|)))
+                  ((string= (second parts) "stop") (setf (gjob-stop job) t) '(:stopping t))
+                  (t (edit-error "Unknown action ~A" (second parts)))))))
+
 (defun load-training (id)
     (let ((str (load-sim id *training-dir*)))
         (and str (jonathan:parse str))))
@@ -1357,6 +1462,9 @@
        (edit-endpoint env (lambda (request) (training-new (getf request :|role|) (getf request :|defs|)))))
       ((string= path "/api/grade")
        (edit-endpoint env #'grade-request))
+      ((substr= "/api/grade/measure" path)
+       (let ((rest (subseq path (length "/api/grade/measure"))))
+          (edit-endpoint env (lambda (request) (gjob-request rest request)))))
       ((and (substr= "/api/train/" path) (search "/play" path))
        (let ((id (subseq path (length "/api/train/") (search "/play" path))))
           (edit-endpoint env (lambda (request) (training-play id (getf request :|card|))))))
