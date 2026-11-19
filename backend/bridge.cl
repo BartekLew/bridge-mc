@@ -984,24 +984,17 @@
                                                                      (<= hcp (or (second range) 10))))))
                                             (t (lambda (suit) (= (permut-hcp suit) range))))))
                             suitdef))
-           (todo-stack (if one-pos `((nil ,one-pos))))
-               (ans nil))
-        (loop while todo-stack
-              do (destructuring-bind (acc remaining) (pop todo-stack)
-                    (let* ((rem-pos (- (car remaining) (length acc)))
-                           (acc* (mapcar (curry #'append acc (repeat rem-pos 0))
-                                         (list '(0) '(1)))))
-
-                      (if (cdr remaining)
-                          (setf todo-stack (append todo-stack (mapcar (curry* #'list (x)
-                                                                              (x (cdr remaining)))
-                                                                      acc*)))
-                          (setf ans (append ans (mapcar (lambda (x) 
-                                                          (even-sublists 4
-                                                             (append x (repeat (- (length hc-supply)
-                                                                                  (length (car acc*)) ) 0))))
-                                                        (if hcp (filter (f* #'permut-hcp hcp) acc*) 
-                                                                acc*))))))))
+           ; honour cards held or not, one level per honour present, in
+           ; breadth-first order
+           (accs (and one-pos (list nil)))
+           (ans nil))
+        (loop for remaining on one-pos
+              do (setf accs (loop for acc in accs
+                                  nconc (let ((base (append acc (repeat (- (car remaining) (length acc)) 0))))
+                                            (list (append base '(0)) (append base '(1)))))))
+        (setf ans (mapcar (lambda (x)
+                              (even-sublists 4 (append x (repeat (- (length hc-supply) (length x)) 0))))
+                          (if hcp (filter (f* #'permut-hcp hcp) accs) accs)))
         (if suithcp (filter (lambda (dist)
                                 (not (position nil (loop for suit in dist
                                                          for test in suithcp
@@ -1047,8 +1040,18 @@
                                                 (loop for i from (- (or min 0) baselen)
                                                             to   (- (or max supply) baselen)
                                                       collect i))))))
-         (filter (f* (curry #'apply #'+) (curry #'eq (- 13 hc-count)))
-                 (apply #'list-prod lc-ranges))))
+        ; the products of lc-ranges summing to the low cards needed, in the
+        ; order of list-prod, pruned by the least and most the rest can add
+        (labels ((gen (ranges need)
+                   (if (null ranges)
+                       (if (= need 0) (list nil))
+                       (let ((rest-min (loop for r in (cdr ranges) sum (if r (first r) 0)))
+                             (rest-max (loop for r in (cdr ranges) sum (if r (car (last r)) 0))))
+                           (if (notany #'null (cdr ranges))
+                               (loop for i in (car ranges)
+                                     when (<= rest-min (- need i) rest-max)
+                                     nconc (mapcar (curry #'cons i) (gen (cdr ranges) (- need i)))))))))
+            (gen lc-ranges (- 13 hc-count)))))
 
 (test (possible-lc-lens '((1 0 1 0) (1 0 0 0) (0 1 0 0) (1 1 1 1))
                         '(4 4 4 4)
@@ -1067,20 +1070,26 @@
      (permuts)
      (len)
      (cur)
+     ; vector of (cumulative weight . honour permut), those of weight 0 left out
+     (cumulative)
      (total-weight :reader total-weight)))
 
 (defgeneric next (distgen))
 
 (defmethod initialize-instance ((this distgen) &key (cards (all-cards)) hcp c d h s)
     (let ((supply (supply cards)))
-        (with-slots (lc-supply len cur permuts total-weight) this
+        (with-slots (lc-supply len cur permuts total-weight cumulative) this
             (setf lc-supply (mapcar #'first supply))
             (setf permuts (hc-permuts supply :hcp hcp :suitdef (list c d h s)))
             (setf len (list c d h s))
             (setf cur nil)
-            (setf total-weight (apply #'+ (loop for x = (next this)
-                                                while x
-                                                collect (first x)))))))
+            (let ((sum 0))
+                (setf cumulative (coerce (loop for x = (next this)
+                                               while x
+                                               when (> (first x) 0)
+                                               collect (cons (incf sum (first x)) (second x)))
+                                         'simple-vector))
+                (setf total-weight sum)))))
 
 (defmethod next ((self distgen))
     (with-slots (cur permuts len lc-supply) self
@@ -1118,16 +1127,35 @@
     ((msg :initarg :msg :initform "No hand fits the cards left" :reader no-hand-msg))
     (:report (lambda (c s) (format s "~A" (no-hand-msg c)))))
 
+; Honour permut of self drawn by weight: binary search of its cumulative
+; weights for the first one above a random number
+(defmethod rand-permut ((self distgen))
+    (let* ((cum (slot-value self 'cumulative))
+           (x (random (total-weight self)))
+           (lo 0)
+           (hi (1- (length cum))))
+        (loop while (< lo hi)
+              do (let ((mid (floor (+ lo hi) 2)))
+                     (if (> (car (svref cum mid)) x) (setf hi mid) (setf lo (1+ mid)))))
+        (cdr (svref cum lo))))
+
+; Doesn't change self, so threads may share it
 (defmethod rand-hand ((self distgen) cards)
     (if (zerop (total-weight self)) (error 'no-hand))
-    (let ((x (random (total-weight self))))
-        (setf (slot-value self 'cur) nil)
-        (loop for opt = (next self)
-                  while (> x (first opt))
-              do (setf x (- x (first opt)))))
-    (let ((hand (distrib-hand (rand-dist self) cards)))
+    (let ((hand (distrib-hand (rand-dist self :dist (rand-permut self)) cards)))
         (list (first hand)
               (mkhand (hand (second hand))))))
+
+; Distgens by the supply of their cards and their params, since building
+; one goes over all holdings of the honours (cleared when it grows large)
+(defparameter *distgens* (make-hash-table :test 'equal :synchronized t))
+
+(defun distgen-for (cards params)
+    (let ((key (cons (supply cards) params)))
+        (or (gethash key *distgens*)
+            (progn (if (> (hash-table-count *distgens*) 500) (clrhash *distgens*))
+                   (setf (gethash key *distgens*)
+                         (apply #'make-instance 'distgen :cards cards params))))))
 
 (defmacro fold-param-lists (initial defs params expression &key (default 'acc))
     (if (> (length params) 1)
@@ -1493,17 +1521,12 @@
                                                                (all-cards)))
                                      (all-cards))))
             (if (not rootgen)
-                (setf rootgen (apply #'make-instance `(distgen ,@(infer-distgen-params (supply cards)
-                                                                                       (car defs)
-                                                                                       (cdr defs))
-                                                               :cards ,cards))))
+                (setf rootgen (distgen-for cards (infer-distgen-params (supply cards) (car defs) (cdr defs)))))
             (labels ((self (rest defs acc)
                        (if (and defs (> (length rest) 13))
-                           (let-from! (rand-hand (apply #'make-instance 
-                                                        (append (list 'distgen :cards rest)
-                                                                (infer-distgen-params (supply rest)
-                                                                                      (car defs)
-                                                                                      (cdr defs))))
+                           (let-from! (rand-hand (distgen-for rest (infer-distgen-params (supply rest)
+                                                                                         (car defs)
+                                                                                         (cdr defs)))
                                                  rest)
                                       (rest* hand)
                               (self rest* (cdr defs) (append acc (list hand))))
@@ -4105,7 +4128,8 @@ W: ♣ A1087 ♦ KQ5 ♥ 762 ♠ Q102"))
 ; Entries are never checked. A void hand discards (nil) or ruffs; one of
 ; side only overruffs an opponent (ruffing its own winners is a ruff plan).
 
-(defparameter *suit-solve-cache* (make-hash-table :test 'equal))
+; Synchronized, as hint searches of training games run in threads at once
+(defparameter *suit-solve-cache* (make-hash-table :test 'equal :synchronized t))
 
 ; Ranks worth trying: the lowest one of each run that no rank of all falls into
 (defun rank-choices (ranks all)
@@ -4307,7 +4331,7 @@ W: ♣ A1087 ♦ KQ5 ♥ 762 ♠ Q102"))
           for y in b
           when (/= x y) return (< x y)))
 
-(defparameter *discard-facts* (make-hash-table))
+(defparameter *discard-facts* (make-hash-table :synchronized t))
 
 ; Does seat hold an entry in suit: fewer of the opponents' cards above his
 ; top one than he has cards there (W's ♥ K8 against the A, not a bare K)?
@@ -5769,10 +5793,10 @@ W: ♣ A1087 ♦ KQ5 ♥ 762 ♠ Q102"))
                                                 (position (first (first c)) *plan-order*)))))))
 
 ; Tricks N-S take from the position by hints, and the lines played, a list
-; of (plan tricks) led from leader
-(defun hint-play (hands leader trump)
-    (let ((o (hint-search hands leader trump -1 (+ (floor (cards-left hands) 4) 1) 0
-                          (make-hash-table :test 'equal))))
+; of (plan tricks) led from leader. memo may be one of an earlier search in
+; the same trump.
+(defun hint-play (hands leader trump &optional (memo (make-hash-table :test 'equal)))
+    (let ((o (hint-search hands leader trump -1 (+ (floor (cards-left hands) 4) 1) 0 memo)))
         (values (car o) (cdr o))))
 
 ; Outcome (tricks . lines) of the position within the window alpha beta:

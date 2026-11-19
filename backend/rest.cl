@@ -376,6 +376,20 @@
                          do (setf hands (play-trick hands leader tr)
                                   leader (trick-taker tr leader trump))))))
 
+; Lines (plan tricks) of the hint search (hint-play) from the end of the
+; play of axis axis-no of saved sim id, for action complete of sim-edit:
+; searched before it, out of *sim-lock*, as it can take minutes
+(defun sim-complete-lines (id axis-no)
+    (let* ((sim (jonathan:parse (or (load-sim id) (edit-error "No simulation ~A" id))))
+           (power (getf (getf sim :|RESULT|) :|POWER|))
+           (axis (if (and (integerp axis-no) (< -1 axis-no (length power)))
+                     (nth axis-no power)
+                     (edit-error "Bad axis ~A" axis-no))))
+        (multiple-value-bind (left leader) (play-state (sim-hands (getf sim :|HANDS|)) axis)
+            (if (every #'null (apply #'append left))
+                (edit-error "All cards are played"))
+            (nth-value 1 (hint-play left leader (str2suitno (getf axis :|TRUMP|)))))))
+
 ; Applies action (pop, clear, split, play, trick, plan or hints) to play of
 ; axis axis-no of saved sim id. Returns (:result ...) with the updated
 ; result, which gets saved, (:choices ...) of tricks to choose from or
@@ -383,8 +397,10 @@
 ; trick taken by card, trick adds the explicit one, or the tricks of a line
 ; (as ones of plan, when given), plan the tricks of plan. A plan with
 ; several variants (see plan-variants) gives them as choices instead, each a
-; line of tricks with its plan and label.
-(defun sim-edit (id axis-no action card trick &optional plan tricks)
+; line of tricks with its plan and label. Complete plays the rest of the
+; deal by the hint search, a sequence for each plan, lines being its result
+; when searched already (sim-complete-lines).
+(defun sim-edit (id axis-no action card trick &optional plan tricks lines)
     (let* ((sim (jonathan:parse (or (load-sim id) (edit-error "No simulation ~A" id))))
            (result (getf sim :|RESULT|))
            (power (getf result :|POWER|))
@@ -453,6 +469,22 @@
                                     (if plan
                                         (push-plan-tricks (json-plan plan) lines)
                                         (push-cards (first lines)))))
+                              ((equal action "complete")
+                                 (check-open)
+                                 (let ((ls (or lines (nth-value 1 (hint-play left leader trump))))
+                                       (h left)
+                                       (l leader)
+                                       (s seqs))
+                                    (loop for (p trs) in ls
+                                          do (dolist (cards trs)
+                                                 (if (not (legal-trick? h l cards))
+                                                     (edit-error "The play changed while the hint search ran"))
+                                                 (setf h (play-trick h l cards)
+                                                       l (trick-taker cards l trump)))
+                                             (setf s (push-plan s p trs trump t)))
+                                    (if (some #'identity (apply #'append h))
+                                        (edit-error "The hint search didn't play all cards"))
+                                    s))
                               ((equal action "play")
                                  (check-open)
                                  (let* ((c (or (str2card card) (edit-error "Bad card ~A" card)))
@@ -559,7 +591,8 @@
     (let ((hs (mapcar #'str2hand formulas)))
         (if (= (length hs) 4) hs (append hs (list (make-instance 'hand :remaining hs))))))
 
-(defun hint-deal-1 (formulas power save timeout)
+; memo, hint-search's, is for one axis only, as its keys leave out trumps
+(defun hint-deal-1 (formulas power save timeout &optional memo)
     (let* ((objs (formula-hands formulas))
            (hands (mapcar #'suits objs)))
         (dotimes (seat 4) (format t "~A~%" (hand-str hands seat)))
@@ -584,7 +617,9 @@
                                       (hint-log "axis ~D: ~A by ~A, play-deal took ~D" i (suitstr trump)
                                                 (nth declarer *seats*) old)
                                       (multiple-value-bind (ns lines)
-                                              (handler-case (hint-play hands leader trump)
+                                              (handler-case (if memo
+                                                                (hint-play hands leader trump memo)
+                                                                (hint-play hands leader trump))
                                                   (hint-timeout ()
                                                       (setf done nil)
                                                       (values (car *hint-best*) (cdr *hint-best*))))
@@ -655,8 +690,9 @@
 (defparameter *training-roles* '("declarer" "leader" "partner" "defender"))
 (defparameter *training-hint-timeout* 60)
 
-; Sim files are written by edits and the hint search thread; searches take
-; turns, as they share caches
+; Sim files are written by edits and the hint search thread. The searches
+; after games take turns, so that they don't all run at once (the caches
+; they share are synchronized, the computer's play doesn't wait for them).
 (defvar *sim-lock* (sb-thread:make-mutex :name "sim files"))
 (defvar *hint-lock* (sb-thread:make-mutex :name "hint search"))
 
@@ -865,11 +901,46 @@
               (training-seats (if (equal (getf game :role) "declarer") :declarer :defender))
               (mapcar #'str2card (getf game :cards)))))
 
+;; Boards: games are numbered as in a match, the number giving the dealer
+;; and who is vulnerable once the deal is turned (N-S being the player's
+;; side; board-dealer, board-vulnerable). The last number handed out is
+;; kept in training/board.txt.
+(defun board-file ()
+    (merge-pathnames "board.txt" *training-dir*))
+
+(defun last-board ()
+    (or (ignore-errors (with-open-file (in (board-file)) (parse-integer (read-line in)))) 0))
+
+(defun save-last-board (n)
+    (ensure-directories-exist *training-dir*)
+    (with-open-file (out (board-file) :direction :output :if-exists :supersede)
+        (format out "~D~%" n)))
+
+(defun seat-vulnerable? (vul seat)
+    (or (equal vul "Both") (equal vul (if (evenp seat) "NS" "EW"))))
+
+; Declarer's score in game for taken tricks
+(defun training-score (game taken)
+    (let* ((contract (getf game :contract))
+           (declarer (position (getf contract :declarer) *seats* :test #'equal)))
+        (contract-score (suitsym (str2suitno (getf contract :trump))) taken
+                        :level (getf contract :level)
+                        :vulnerable (seat-vulnerable? (getf game :vulnerable) declarer)
+                        :double (cdr (assoc (getf contract :doubled) '(("X" . x) ("XX" . xx)) :test #'equal)))))
+
+; 4♠ by S vulnerable making ten tricks; 3NT doubled by E vulnerable two
+; down, N-S vulnerable not mattering
+(test (list (training-score '(:vulnerable "NS" :contract (:level 4 :trump "♠" :declarer "S" :doubled "")) 10)
+            (training-score '(:vulnerable "Both" :contract (:level 3 :trump "NT" :declarer "E" :doubled "X")) 7)
+            (training-score '(:vulnerable "NS" :contract (:level 3 :trump "NT" :declarer "E" :doubled "X")) 7))
+      '(620 -500 -300)
+      equal)
+
 ; What the player sees of game id: auction and contract, the hands of his
 ; seats and dummy's once the opening lead is made (all at the end), tricks
 ; done and the one going on, the seat to play next and tricks taken by
-; declarer's side and by the defence. A finished game has the deal and the
-; id of its sim.
+; declarer's side and by the defence. A finished game has the deal, the id
+; of its sim and declarer's score.
 (defun training-view (id game)
     (destructuring-bind (hands declarer trump mine cards) (training-game game)
         (multiple-value-bind (left done trick leader) (training-position hands declarer trump cards)
@@ -878,6 +949,10 @@
                 `(:id ,id
                   :role ,(getf game :role)
                   :dealer ,(getf game :dealer)
+                  :board ,(or (getf game :board) :null)
+                  :claimed ,(or (getf game :claimed) :null)
+                  :vulnerable ,(or (getf game :vulnerable) "None")
+                  ,@(and over `(:score ,(training-score game taken)))
                   :auction ,(getf game :auction)
                   :contract ,(getf game :contract)
                   :mine ,(mapcar (lambda (s) (nth s *seats*)) mine)
@@ -908,15 +983,16 @@
       :sequences ,(play-sequences outcome trump hands)))
 
 ; Plays the contract (trump declarer) of the deal of formulas by hints in a
-; thread, adding the line to the axes of sim id when done
-(defun training-hints (id formulas trump declarer)
+; thread, adding the line to the axes of sim id when done; memo is the
+; search's of the computer's play in the game
+(defun training-hints (id formulas trump declarer &optional memo)
     (sb-thread:make-thread
         (lambda ()
             (let ((axis (handler-case
                             (sb-thread:with-mutex (*hint-lock*)
                                 (let ((*standard-output* (make-broadcast-stream)))
                                     (first (getf (nth-value 1 (hint-deal-1 formulas (list (list trump declarer))
-                                                                           nil *training-hint-timeout*))
+                                                                           nil *training-hint-timeout* memo))
                                                  :power))))
                           (error (e) (format t "~&[ERROR] hint search of ~A: ~A~%" id e) nil))))
                 (sb-thread:with-mutex (*sim-lock*)
@@ -932,7 +1008,7 @@
 
 ; Sim of a finished game: the player's play (edited), play-deal's, and the
 ; hint search's to come
-(defun training-sim (game hands declarer trump cards)
+(defun training-sim (game hands declarer trump cards &optional memo)
     (let* ((objs (roll (- declarer) (mapcar (lambda (s) (make-instance 'hand := (mapcar #'copy-list s)))
                                             hands)))
            (computer (apply #'play-deal (suitsym trump) objs))
@@ -946,18 +1022,73 @@
                                                                done)))
                                    ,(training-axis "Computer" computer trump declarer objs
                                                    (second (score computer))))))))
-        (training-hints id (getf game :hands) trump declarer)
+        (training-hints id (getf game :hands) trump declarer memo)
         id))
 
+; hint-search memos of games in progress by id, as (memo . last used,
+; universal time), so that the computer's play by hints and the hint search
+; after the game reuse what it found. A game whose memo is gone gets a new
+; one, searching again.
+(defvar *training-memos* (make-hash-table :test 'equal :synchronized t))
+
+; Positions the memos may hold in all (a position takes about 455 bytes, a
+; game's memo 1600 to 40000 of them); past it, the least recently used ones
+; are dropped (trim-training-memos). Memos of games in the queue don't count.
+(defparameter *training-memo-budget* 300000)
+
+; Memo of game id, made when it has none, its use noted
+(defun training-memo (id)
+    (let ((e (gethash id *training-memos*)))
+        (if e
+            (progn (setf (cdr e) (get-universal-time)) (car e))
+            (let ((memo (make-hash-table :test 'equal)))
+                (setf (gethash id *training-memos*) (cons memo (get-universal-time)))
+                memo))))
+
+; Drops the least recently used memos, but that of game keep, till they hold
+; at most *training-memo-budget* positions
+(defun trim-training-memos (keep)
+    (sb-ext:with-locked-hash-table (*training-memos*)
+        (let* ((others (sort (loop for id being the hash-keys of *training-memos* using (hash-value e)
+                                   unless (equal id keep)
+                                   collect (list id (cdr e) (hash-table-count (car e))))
+                             #'< :key #'second))
+               (total (+ (loop for o in others sum (third o))
+                         (let ((e (gethash keep *training-memos*))) (if e (hash-table-count (car e)) 0)))))
+            (loop for (id nil n) in others
+                  while (> total *training-memo-budget*)
+                  do (remhash id *training-memos*)
+                     (decf total n)))))
+
+; Over the budget of 8 positions, the memo used longest ago goes, the
+; current game's staying though not used since
+(test (let ((*training-memos* (make-hash-table :test 'equal))
+            (*training-memo-budget* 8))
+          (flet ((memo (id n time)
+                     (let ((m (make-hash-table)))
+                         (dotimes (i n) (setf (gethash i m) t))
+                         (setf (gethash id *training-memos*) (cons m time)))))
+              (memo "old" 3 1)
+              (memo "newer" 3 2)
+              (memo "current" 4 0)
+              (trim-training-memos "current")
+              (sort (loop for id being the hash-keys of *training-memos* collect id) #'string<)))
+      '("current" "newer")
+      equal)
+
 ; Game id with cards played, then the computer's till the player is to play
-; again; saved, and made a sim when finished. Returns training-view.
-(defun training-advance (id game cards)
+; again (with claim, all the rest, his seats too); saved, and made a sim
+; when finished. Returns training-view.
+(defun training-advance (id game cards &optional claim)
     (destructuring-bind (hands declarer trump mine played) (training-game game)
         (declare (ignore played))
-        (let ((cards (computer-plays hands declarer trump cards mine)))
+        (let* ((memo (training-memo id))
+               (cards (computer-plays hands declarer trump cards (if claim nil mine) memo)))
+            (trim-training-memos id)
             (setf (getf game :cards) (mapcar #'cardstr cards))
-            (if (= (length cards) 52)
-                (setf (getf game :sim) (training-sim game hands declarer trump cards)))
+            (when (= (length cards) 52)
+                (remhash id *training-memos*)
+                (setf (getf game :sim) (training-sim game hands declarer trump cards memo)))
             (write-sim id game *training-dir*)
             (training-view id game))))
 
@@ -975,8 +1106,12 @@
                      (list (lambda () (reorder (build d) order)) 1000))))))
 
 ; New game of the player in role (see *training-roles*) on a deal of defs
-; (see training-generator)
-(defun training-new (role &optional defs)
+; (see training-generator) as board number board, its dealer and
+; vulnerability (dealt again till the board's dealer deals; fixed hands may
+; have any of them deal, in case they are passed out or have the wrong
+; declarer), prepared up to the player's first card, the computer's cards
+; before it played by hints: (id game memo), not saved yet
+(defun training-prepare (role defs board)
     (if (not (member role *training-roles* :test #'equal))
         (edit-error "Bad role ~A" role))
     (destructuring-bind (hands dealer bids (level trump declarer doubled))
@@ -984,20 +1119,129 @@
                         (handler-case (training-generator defs)
                             (edit-error (e) (error e))
                             (error (e) (edit-error "Bad hands: ~A" e)))
-                    (handler-case (training-deal (intern (string-upcase role) :keyword) generator tries)
+                    (handler-case (training-deal (intern (string-upcase role) :keyword) generator tries
+                                                 (board-dealer board) (eql tries 1))
                         (error (e) (edit-error "Cannot deal these hands: ~A" e))))
-                (edit-error "These hands are passed out"))
-        (training-advance (new-sim-id)
-                          `(:hands ,(loop for seat from 0 below 4 collect (hand-formula hands seat))
-                            :role ,role
-                            :dealer ,(nth dealer *seats*)
-                            :auction ,(mapcar #'call-str bids)
-                            :contract (:level ,level
-                                       :trump ,(suitstr trump)
-                                       :declarer ,(nth declarer *seats*)
-                                       :doubled ,(if doubled (call-str doubled) ""))
-                            :cards nil)
-                          nil)))
+                (edit-error "These hands are passed out, or don't give you this role with ~A dealing"
+                            (nth (board-dealer board) *seats*)))
+        (let ((memo (make-hash-table :test 'equal))
+              ; copied, as the constant tail of the backquote (:cards nil) is
+              ; one list shared by all games, and :cards is set below
+              (game (copy-tree
+                     `(:hands ,(loop for seat from 0 below 4 collect (hand-formula hands seat))
+                      :role ,role
+                      :board ,board
+                      :dealer ,(nth dealer *seats*)
+                      :vulnerable ,(board-vulnerable board)
+                      :auction ,(mapcar #'call-str bids)
+                      :contract (:level ,level
+                                 :trump ,(suitstr trump)
+                                 :declarer ,(nth declarer *seats*)
+                                 :doubled ,(if doubled (call-str doubled) ""))
+                      :cards nil))))
+            (destructuring-bind (hs decl tr mine played) (training-game game)
+                (declare (ignore played))
+                (setf (getf game :cards) (mapcar #'cardstr (computer-plays hs decl tr nil mine memo))))
+            (list (new-sim-id) game memo))))
+
+; Saves a game training-prepare made, keeping its memo and its board
+; number as the last one, and returns its view
+(defun training-start (prepared)
+    (destructuring-bind (id game memo) prepared
+        (setf (gethash id *training-memos*) (cons memo (get-universal-time)))
+        (trim-training-memos id)
+        (save-last-board (getf game :board))
+        (write-sim id game *training-dir*)
+        (training-view id game)))
+
+;; Batches: the games to come are prepared by a worker thread while the
+;; player plays, so that a new game starts at once. The queue holds up to
+;; batch of them for one key (role defs), numbered on from the last board
+;; handed out (next, the worker's next one); asking for a game of another
+;; key makes a new queue, the old one's worker stopping after its game.
+(defparameter *training-batch* 6)
+(defparameter *training-max-batch* 20)
+
+(defstruct tqueue key (batch 0) (games nil) (working nil) (next 1))
+
+(defvar *training-queue* nil)
+(defvar *training-queue-lock* (sb-thread:make-mutex :name "training queue"))
+(defvar *training-queue-ready* (sb-thread:make-waitqueue :name "training queue ready"))
+
+; Starts the worker of queue q unless it is working or full; called with
+; the lock held. It stops when the queue is full or replaced, or a game
+; can't be prepared (the player then gets the error preparing one himself).
+(defun training-refill (q role defs)
+    (when (and (not (tqueue-working q)) (< (length (tqueue-games q)) (tqueue-batch q)))
+        (setf (tqueue-working q) t)
+        (sb-thread:make-thread
+            (lambda ()
+                (let ((*random-state* (make-random-state t)))
+                    ; however it ends, the queue is told it no longer works
+                    (unwind-protect
+                        (loop
+                            (let* ((board (sb-thread:with-mutex (*training-queue-lock*)
+                                              (prog1 (tqueue-next q) (incf (tqueue-next q)))))
+                                   (prepared (handler-case (training-prepare role defs board)
+                                                 (error (e) (format t "~&[training batch] ~A~%" e) nil))))
+                                (sb-thread:with-mutex (*training-queue-lock*)
+                                    (if prepared
+                                        (setf (tqueue-games q) (append (tqueue-games q) (list prepared)))
+                                        ; the number is used again
+                                        (if (= (tqueue-next q) (1+ board)) (setf (tqueue-next q) board)))
+                                    (when (or (null prepared) (not (eq q *training-queue*))
+                                              (>= (length (tqueue-games q)) (tqueue-batch q)))
+                                        (setf (tqueue-working q) nil))
+                                    (sb-thread:condition-broadcast *training-queue-ready*)
+                                    (if (not (tqueue-working q)) (return)))))
+                        (sb-thread:with-mutex (*training-queue-lock*)
+                            (when (tqueue-working q)
+                                (setf (tqueue-working q) nil)
+                                (sb-thread:condition-broadcast *training-queue-ready*))))))
+            :name "training batch")))
+
+; New game (see training-prepare) from the queue, waiting for the worker's
+; next one when it is empty; prepared here when there is no worker (batch
+; 0, or it failed), with the queue's next board number. The queue is
+; filled up to batch again.
+(defun training-new (role &optional defs batch)
+    (let* ((batch (if (and (integerp batch) (<= 0 batch *training-max-batch*)) batch *training-batch*))
+           (key (list role defs))
+           (board nil)
+           (prepared (sb-thread:with-mutex (*training-queue-lock*)
+                         (let ((q *training-queue*))
+                             (when (not (and q (equal (tqueue-key q) key)))
+                                 (setf q (make-tqueue :key key :next (1+ (last-board)))
+                                       *training-queue* q))
+                             (setf (tqueue-batch q) batch)
+                             (training-refill q role defs)
+                             (prog1 (loop (cond ((tqueue-games q) (return (pop (tqueue-games q))))
+                                                ((tqueue-working q)
+                                                 (sb-thread:condition-wait *training-queue-ready* *training-queue-lock*))
+                                                (t (setf board (tqueue-next q))
+                                                   (incf (tqueue-next q))
+                                                   (return nil))))
+                                 (training-refill q role defs))))))
+        (append (training-start (or prepared (training-prepare role defs board)))
+                (list :queue (training-queue-view)))))
+
+; Games ready and the worker's state, for the page
+(defun training-queue-view ()
+    (sb-thread:with-mutex (*training-queue-lock*)
+        (let ((q *training-queue*))
+            `(:ready ,(if q (length (tqueue-games q)) 0)
+              :working ,(if (and q (tqueue-working q)) t :false)))))
+
+; The player claims the rest of game id: all seats play it out by hints,
+; as the hint search finds best for both sides (whether it was his to claim
+; isn't checked). The game keeps how many cards were played at the claim.
+(defun training-claim (id)
+    (let ((game (or (load-training id) (edit-error "No game ~A" id))))
+        (destructuring-bind (hands declarer trump mine cards) (training-game game)
+            (declare (ignore hands declarer trump mine))
+            (if (= (length cards) 52) (edit-error "All cards are played"))
+            (setf (getf game :claimed) (length cards))
+            (training-advance id game cards t))))
 
 ; Card played by the player in game id
 (defun training-play (id card)
@@ -1371,6 +1615,15 @@
                                                       (t (read-from-string val)))))
                   defs)))
 
+; Games prepared one after another don't share their cards (a queued game
+; once got the cards of the one prepared after it); here, as training-prepare
+; needs hand-or-def-parser
+(test (let ((a (second (training-prepare "leader" nil 1)))
+            (b (second (training-prepare "leader" nil 2))))
+          (eq (member :cards a) (member :cards b)))
+      nil
+      eq)
+
 (defun measure-parser (names)
     (if (equal names '("")) (make-instance 'result :ok '(best-outcomes))
         (fold #'combine
@@ -1453,18 +1706,26 @@
                                                  nil nil #'contracts-parser)))
       ((string= path "/api/simedit")
        (edit-endpoint env (lambda (request)
-                             (sb-thread:with-mutex (*sim-lock*)
-                                (sim-edit (getf request :|id|) (getf request :|axis|)
-                                          (getf request :|action|) (getf request :|card|)
-                                          (getf request :|trick|) (getf request :|plan|)
-                                          (getf request :|tricks|))))))
+                             (let ((lines (and (equal (getf request :|action|) "complete")
+                                               (sim-complete-lines (getf request :|id|) (getf request :|axis|)))))
+                                 (sb-thread:with-mutex (*sim-lock*)
+                                    (sim-edit (getf request :|id|) (getf request :|axis|)
+                                              (getf request :|action|) (getf request :|card|)
+                                              (getf request :|trick|) (getf request :|plan|)
+                                              (getf request :|tricks|) lines))))))
       ((string= path "/api/train")
-       (edit-endpoint env (lambda (request) (training-new (getf request :|role|) (getf request :|defs|)))))
+       (edit-endpoint env (lambda (request) (training-new (getf request :|role|) (getf request :|defs|)
+                                                          (getf request :|batch|)))))
+      ((string= path "/api/train-queue")
+       (json-response 200 (training-queue-view)))
       ((string= path "/api/grade")
        (edit-endpoint env #'grade-request))
       ((substr= "/api/grade/measure" path)
        (let ((rest (subseq path (length "/api/grade/measure"))))
           (edit-endpoint env (lambda (request) (gjob-request rest request)))))
+      ((and (substr= "/api/train/" path) (search "/claim" path))
+       (let ((id (subseq path (length "/api/train/") (search "/claim" path))))
+          (edit-endpoint env (lambda (request) (declare (ignore request)) (training-claim id)))))
       ((and (substr= "/api/train/" path) (search "/play" path))
        (let ((id (subseq path (length "/api/train/") (search "/play" path))))
           (edit-endpoint env (lambda (request) (training-play id (getf request :|card|))))))

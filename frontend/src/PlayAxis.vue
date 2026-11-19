@@ -79,8 +79,20 @@ function applyHint(hint) {
     editPlay('plan', { plan: planRequest(hint["PLAN"]) });
 }
 
-// Applies an edit (pop, clear, split, play, trick or plan, see sim-edit in
-// rest.cl) to play of the contract
+// Is the rest of the deal being played by the hint search (action complete)
+const completing = ref(false);
+
+async function complete() {
+    completing.value = true;
+    try {
+        await editPlay('complete');
+    } finally {
+        completing.value = false;
+    }
+}
+
+// Applies an edit (pop, clear, split, play, trick, plan or complete, see
+// sim-edit in rest.cl) to play of the contract
 async function editPlay(action, extra = {}) {
     const body = await postJson("api/simedit",
                                 { id: props.simId, axis: props.axisNo, action: action, ...extra },
@@ -272,6 +284,10 @@ async function editPlay(action, extra = {}) {
                 :disabled="done || axis['SEQUENCES'].length == 0
                            || axis['SEQUENCES'].at(-1)['TRICKS'].length == 0"
                 @click="editPlay('split')">New sequence</button>
+        <button class="px-3 py-1 rounded bg-blue-100 hover:bg-blue-200 disabled:opacity-50"
+                :disabled="done || completing"
+                title="Plays the rest of the deal as the hint search finds best for both sides"
+                @click="complete">{{ completing ? 'Searching…' : 'Complete by hints' }}</button>
       </div>
     </div>
     </template>

@@ -35,6 +35,36 @@ const roles = [
 ];
 const role = ref('declarer');
 
+// How many deals the backend prepares ahead while you play, remembered
+// in this browser
+function storedBatch() {
+    try {
+        const n = parseInt(localStorage.getItem('trainingBatch'));
+        return Number.isInteger(n) && n >= 0 && n <= 20 ? n : 6;
+    } catch(e) {
+        return 6;
+    }
+}
+const batch = ref(storedBatch());
+function saveBatch() {
+    const n = Math.max(0, Math.min(20, parseInt(batch.value) || 0));
+    batch.value = n;
+    try { localStorage.setItem('trainingBatch', String(n)); } catch(e) { }
+}
+
+// Deals prepared ahead: { READY, WORKING }, polled while the backend works
+const queue = ref(null);
+let queueTimer = null;
+function showQueue(q) {
+    clearTimeout(queueTimer);
+    queue.value = q;
+    if(q && q["WORKING"]) queueTimer = setTimeout(pollQueue, 5000);
+}
+async function pollQueue() {
+    const response = await fetch("api/train-queue");
+    if(response.ok) showQueue(await response.json());
+}
+
 // Hands of the deals to come, N E S W as in the simulator (N deals; seats
 // after the pushed ones are random): cards or ranges. The deal is turned
 // so that the user sits S in his role.
@@ -70,8 +100,11 @@ async function newGame() {
     try {
         sim.value = null;
         const defs = hands.value.pushed().map((hand) => hand.restDef());
-        const body = await postJson("api/train", { role: role.value, defs: defs }, "Cannot deal");
-        if(body) await showGame(body);
+        const body = await postJson("api/train", { role: role.value, defs: defs, batch: batch.value }, "Cannot deal");
+        if(body) {
+            showQueue(body["QUEUE"]);
+            await showGame(body);
+        }
     } finally {
         busy.value = false;
     }
@@ -85,6 +118,21 @@ async function playCard(card) {
         if(body) await showGame(body);
     } finally {
         busy.value = false;
+    }
+}
+
+// Claims the rest: all seats play it out as the hint search finds best
+const claiming = ref(false);
+async function claim() {
+    if(busy.value) return;
+    busy.value = true;
+    claiming.value = true;
+    try {
+        const body = await postJson(`api/train/${game.value["ID"]}/claim`, {}, "Cannot claim");
+        if(body) await showGame(body);
+    } finally {
+        busy.value = false;
+        claiming.value = false;
     }
 }
 
@@ -113,7 +161,26 @@ onMounted(() => {
     const id = new URLSearchParams(window.location.search).get("game");
     if(id) restoreGame(id);
 });
-onUnmounted(() => clearTimeout(pollTimer));
+onUnmounted(() => { clearTimeout(pollTimer); clearTimeout(queueTimer); });
+
+// Is seat vulnerable in the game
+function seatVulnerable(seat) {
+    const vul = game.value && game.value["VULNERABLE"];
+    return vul === "Both" || vul === (seat === 'N' || seat === 'S' ? "NS" : "EW");
+}
+
+const vulnerableStr = computed(() => {
+    const vul = game.value && game.value["VULNERABLE"];
+    return { None: "nobody", NS: "we (N-S)", EW: "they (E-W)", Both: "both sides" }[vul] || "nobody";
+});
+
+// Score of the game for your side (N-S)
+const scoreStr = computed(() => {
+    if(!over.value || game.value["SCORE"] === undefined) return "";
+    const declaring = declarer.value === 'N' || declarer.value === 'S';
+    const score = declaring ? game.value["SCORE"] : -game.value["SCORE"];
+    return `${score > 0 ? '+' : ''}${score}`;
+});
 
 const over = computed(() => game.value && !game.value["NEXT"]);
 const contract = computed(() => game.value && game.value["CONTRACT"]);
@@ -183,19 +250,32 @@ const simDeal = computed(() => sim.value && formulasDeal(sim.value.hands));
       <a href="./" class="text-sm text-blue-700 underline">Simulator</a>
     </div>
 
-    <!-- Role and a new deal -->
-    <div class="bg-white shadow-lg rounded-2xl p-4 flex flex-wrap gap-4 items-center justify-center">
-      <label v-for="r in roles" :key="r.value" class="flex items-center gap-1 text-sm">
-        <input type="radio" v-model="role" :value="r.value" /> {{ r.label }}
-      </label>
-      <button @click="newGame" :disabled="busy"
-              class="px-4 py-1 rounded-xl font-semibold"
-              :class="busy ? 'bg-gray-300' : 'bg-blue-200 hover:bg-blue-300'">
-        {{ busy && !game ? 'Dealing…' : 'New deal' }}
-      </button>
-      <button @click="showHands = !showHands" class="text-sm text-blue-700 underline">
-        {{ showHands ? 'Hide hands' : 'Set hands' }}{{ hands.hasPushed() ? ` (${hands.pushed().length} set)` : '' }}
-      </button>
+    <!-- Role and a new deal; the hands and deals prepared ahead below -->
+    <div class="bg-white shadow-lg rounded-2xl p-4 flex flex-col gap-3 items-center">
+      <div class="flex flex-wrap gap-4 items-center justify-center">
+        <label v-for="r in roles" :key="r.value" class="flex items-center gap-1 text-sm">
+          <input type="radio" v-model="role" :value="r.value" /> {{ r.label }}
+        </label>
+        <button @click="newGame" :disabled="busy"
+                class="px-4 py-1 rounded-xl font-semibold"
+                :class="busy ? 'bg-gray-300' : 'bg-blue-200 hover:bg-blue-300'">
+          {{ busy && !game ? 'Dealing…' : 'New deal' }}
+        </button>
+      </div>
+      <div class="flex flex-wrap gap-4 items-center justify-center">
+        <button @click="showHands = !showHands" class="text-sm text-blue-700 underline">
+          {{ showHands ? 'Hide hands' : 'Set hands' }}{{ hands.hasPushed() ? ` (${hands.pushed().length} set)` : '' }}
+        </button>
+        <label class="flex items-center gap-1 text-sm"
+               title="Deals prepared ahead while you play (0: each one when you ask for it)">
+          Prepare ahead
+          <input type="number" min="0" max="20" v-model.number="batch" @change="saveBatch"
+                 class="border rounded px-1 w-14" />
+        </label>
+        <span v-if="queue" class="text-sm text-gray-600">
+          {{ queue['READY'] }} ready{{ queue['WORKING'] ? ', preparing more…' : '' }}
+        </span>
+      </div>
     </div>
 
     <!-- Hands of the deals to come, as in the simulator -->
@@ -225,8 +305,9 @@ const simDeal = computed(() => sim.value && formulasDeal(sim.value.hands));
         <table class="text-sm font-mono">
           <thead>
             <tr>
-              <th v-for="seat in seats" :key="seat" class="px-3"
-                  :class="{ 'text-blue-700': seat === 'S' }">{{ seat }}</th>
+              <th v-for="seat in seats" :key="seat" class="px-3 rounded"
+                  :class="{ 'text-blue-700': seat === 'S' && !seatVulnerable(seat),
+                            'bg-red-600 text-white': seatVulnerable(seat) }">{{ seat }}</th>
             </tr>
           </thead>
           <tbody>
@@ -237,14 +318,19 @@ const simDeal = computed(() => sim.value && formulasDeal(sim.value.hands));
           </tbody>
         </table>
         <div class="text-center">
+          <div v-if="game['BOARD']" class="text-sm text-gray-600">
+            Board {{ game['BOARD'] }}, dealer {{ game['DEALER'] }}
+          </div>
           <div class="text-xl"><b>{{ contractStr(contract) }}</b></div>
           <div class="text-sm text-gray-600">
             You are {{ game['ROLE'] === 'declarer' ? 'declarer (S) with dummy N' : 'defending from S' }}
           </div>
+          <div class="text-sm">Vulnerable: <b :class="{ 'text-red-600': game['VULNERABLE'] !== 'None' }">{{ vulnerableStr }}</b></div>
           <div class="text-sm mt-1">
             Declarer {{ game['TAKEN'][0] }} : {{ game['TAKEN'][1] }} defence
           </div>
           <div v-if="over" class="text-lg mt-1 font-semibold">{{ resultStr }}</div>
+          <div v-if="scoreStr" class="text-sm">Score for you: <b>{{ scoreStr }}</b></div>
         </div>
       </div>
 
@@ -283,7 +369,8 @@ const simDeal = computed(() => sim.value && formulasDeal(sim.value.hands));
           <div v-else-if="seat" class="font-mono text-sm leading-tight min-w-[8rem]">
             <div class="font-bold"
                  :class="{ 'text-blue-700': seat === declarer, 'underline': seat === game['NEXT'] }">
-              {{ seat }}
+              <span :class="{ 'bg-red-600 text-white rounded px-1': seatVulnerable(seat) }"
+                    :title="seatVulnerable(seat) ? 'vulnerable' : 'not vulnerable'">{{ seat }}</span>
               <span class="font-normal text-gray-500">
                 {{ seat === declarer ? 'declarer' : seat === dummy ? 'dummy' : '' }}
               </span>
@@ -310,8 +397,21 @@ const simDeal = computed(() => sim.value && formulasDeal(sim.value.hands));
         </template>
       </div>
 
-      <p v-if="!over && game['MINE'].includes(game['NEXT'])" class="text-sm text-gray-600">
-        Your turn: play a card from <b>{{ game['NEXT'] }}</b>.
+      <div v-if="!over && game['MINE'].includes(game['NEXT'])" class="flex items-center gap-3">
+        <p class="text-sm text-gray-600">
+          Your turn: play a card from <b>{{ game['NEXT'] }}</b>.
+        </p>
+        <button @click="claim" :disabled="busy"
+                title="The rest is played out as the hint search finds best for both sides"
+                class="px-3 py-1 rounded-xl text-sm font-semibold"
+                :class="busy ? 'bg-gray-300' : 'bg-green-200 hover:bg-green-300'">
+          {{ claiming ? 'Playing out…' : 'Claim' }}
+        </button>
+      </div>
+      <p v-if="over && game['CLAIMED'] !== null && game['CLAIMED'] !== undefined" class="text-sm text-gray-600">
+        You claimed after {{ Math.floor(game['CLAIMED'] / 4) }} trick(s)<template
+          v-if="game['CLAIMED'] % 4"> and {{ game['CLAIMED'] % 4 }} card(s)</template>;
+        the rest was played out by the hint search.
       </p>
     </div>
 

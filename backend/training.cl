@@ -135,24 +135,45 @@
 
 ; New deal of generator (hand objects N E S W, N dealing) bid by the
 ; computer, turned so the player in role sits S (seat 2), as (hands dealer
-; bids contract), contract as auction-contract gives it. Passed out deals are
-; dealt again, as are those the bidding fails on (the error is printed), up
-; to tries deals; nil when none of them is bid to a contract.
-(defun training-deal (role &optional (generator (lambda () (build full-random))) tries)
+; bids contract), contract as auction-contract gives it. With dealer, the
+; seat that must deal once the deal is turned, deals where the dealer comes
+; out elsewhere are dealt again too; with any-dealer, each deal is first
+; tried with N dealing, then E, S and W, else only with N. Passed out deals
+; are dealt again, as are those the bidding fails on (the error is printed),
+; up to tries deals; nil when none of them fits.
+(defun training-deal (role &optional (generator (lambda () (build full-random))) tries dealer any-dealer)
     (loop for try from 1
           while (or (null tries) (<= try tries))
           do
-        (let* ((objs (funcall generator))
-               (bids (handler-case (drain (make-instance 'bidding :deal objs))
-                         (error (e)
-                             (format t "~&[ERROR] bidding of ~A: ~A~%" (mapcar #'suits objs) e)
-                             nil)))
-               (contract (auction-contract bids)))
-            (when contract
-                (destructuring-bind (level strain declarer doubled) contract
-                    (let ((k (mod (- 2 (role-seat role declarer)) 4)))
-                        (return (list (roll k (mapcar #'suits objs)) k bids
-                                      (list level strain (mod (+ declarer k) 4) doubled)))))))))
+        (let ((objs (funcall generator)))
+            (loop for g in (if any-dealer '(0 1 2 3) '(0))
+                  do (let* ((bids (handler-case (drain (make-instance 'bidding :deal (roll (- g) objs)))
+                                      (error (e)
+                                          (format t "~&[ERROR] bidding of ~A: ~A~%" (mapcar #'suits objs) e)
+                                          nil)))
+                            (contract (auction-contract bids)))
+                         (when contract
+                             (destructuring-bind (level strain declarer* doubled) contract
+                                 (let* ((declarer (mod (+ declarer* g) 4))
+                                        (k (mod (- 2 (role-seat role declarer)) 4)))
+                                     (when (or (null dealer) (= (mod (+ g k) 4) dealer))
+                                         (return-from training-deal
+                                             (list (roll k (mapcar #'suits objs)) (mod (+ g k) 4) bids
+                                                   (list level strain (mod (+ declarer k) 4) doubled))))))))))))
+
+; Board number n of a match: its dealer (N E S W in turn) and who is
+; vulnerable, in the cycle of 16 boards
+(defun board-dealer (n)
+    (mod (- n 1) 4))
+
+(defun board-vulnerable (n)
+    (nth (mod (- n 1) 16)
+         '("None" "NS" "EW" "Both" "NS" "EW" "Both" "None" "EW" "Both" "None" "NS" "Both" "None" "NS" "EW")))
+
+(test (loop for n from 1 to 17 collect (list (board-dealer n) (board-vulnerable n)))
+      '((0 "None") (1 "NS") (2 "EW") (3 "Both") (0 "NS") (1 "EW") (2 "Both") (3 "None")
+        (0 "EW") (1 "Both") (2 "None") (3 "NS") (0 "Both") (1 "None") (2 "NS") (3 "EW") (0 "None"))
+      equal)
 
 ; Seats the player plays from: declarer's and dummy's (N) or his own (S)
 (defun training-seats (role)
@@ -219,15 +240,85 @@
                      '((0 3) (0 4) (0 11)))
       '(0 12) equal)
 
+;; Computer play by hints
+; Seconds the hint search may take for one card before the computer takes
+; the best found so far, or computer-card when none (nil: no limit)
+(defparameter *hint-card-seconds* nil)
+
+; File each card of the computer's play by hints is logged to, with the
+; time it took, when not nil
+(defparameter *hint-card-log* "hint-card.log")
+
+; Card of the seat next to play to trick (cards so far from leader, hands as
+; at its start) by hints: the first tricks of the variants of plan-hints
+; starting with those cards, played out as a game tree, each seat taking the
+; card best for its side, a whole trick worth its tricks for N-S and what
+; hint-search finds after it (memo, the search's, kept for the game),
+; searched by alpha-beta, the lines in the order of hint-choices. Past
+; *hint-deadline* the best card found so far, if any. Nil when no line starts
+; with the cards, as when the player chose one no hint has.
+(defun hint-card (hands leader trump trick memo)
+    (let* ((n (length trick))
+           (firsts (remove-duplicates
+                       (loop for choice in (hint-choices (plan-hints hands leader trump) hands leader trump)
+                             append (loop for tricks in (rest choice)
+                                          for tr = (first tricks)
+                                          when (equal (subseq tr 0 n) trick) collect tr))
+                       :test #'equal :from-end t))
+           (found nil))
+        ; (value card) of the best card at index k of the tricks cands, value
+        ; a bound when not within alpha beta
+        (labels ((best (k cands alpha beta)
+                     (if (= k 4)
+                         (multiple-value-bind (ns after next) (line-result hands leader trump (list (first cands)))
+                             (list (+ ns (car (hint-search after next trump (- alpha ns) (- beta ns) 1 memo))) nil))
+                         (let ((maxp (evenp (+ leader k)))
+                               (ans nil))
+                             (dolist (card (remove-duplicates (mapcar (lambda (tr) (nth k tr)) cands)
+                                                              :test #'equal :from-end t)
+                                           ans)
+                                 (let ((v (first (best (1+ k) (remove-if-not (lambda (tr) (equal (nth k tr) card))
+                                                                             cands)
+                                                       alpha beta))))
+                                     (when (or (null ans) (if maxp (> v (first ans)) (< v (first ans))))
+                                         (setf ans (list v card))
+                                         (if (= k n) (setf found card)))
+                                     (if maxp (setf alpha (max alpha v)) (setf beta (min beta v)))
+                                     (if (>= alpha beta) (return ans))))))))
+            (and firsts
+                 (handler-case (second (best n firsts -1 14))
+                     (hint-timeout (e) (if found found (error e))))))))
+
+; The computer's card at trick (so far, led by leader) by hints, start the
+; hands at its start, left without its cards; computer-card when the hints
+; have none in time
+(defun computer-hint-card (start left leader trump trick memo)
+    (let* ((t0 (get-internal-real-time))
+           (hint (let ((*hint-deadline* (and *hint-card-seconds*
+                                             (+ t0 (* *hint-card-seconds* internal-time-units-per-second)))))
+                     (handler-case (hint-card start leader trump trick memo)
+                         (error (e) (format t "~&[hint-card] ~A~%" e) nil))))
+           (card (or hint (computer-card left leader trump trick))))
+        (when *hint-card-log*
+            (with-open-file (o *hint-card-log* :direction :output :if-exists :append
+                               :if-does-not-exist :create :external-format :utf-8)
+                (format o "~{~2,'0D~^:~} trick ~D, ~A plays ~A~:[ (computer-card)~;~] after ~,2Fs~%"
+                        (multiple-value-bind (s m h) (decode-universal-time (get-universal-time)) (list h m s))
+                        (- 14 (floor (cards-left start) 4)) (nth (mod (+ leader (length trick)) 4) '(n e s w))
+                        (cardstr card) hint
+                        (/ (- (get-internal-real-time) t0) internal-time-units-per-second))))
+        card))
+
 ; Cards played, the computer's ones added until a seat of mine is to play or
-; all cards are played
-(defun computer-plays (hands declarer trump cards mine)
+; all cards are played; by hints, memo being the hint search's for the game
+(defun computer-plays (hands declarer trump cards mine &optional (memo (make-hash-table :test 'equal)))
     (loop
         (multiple-value-bind (left done trick leader) (training-position hands declarer trump cards)
             (declare (ignore done))
             (if (or (= (length cards) 52) (member (mod (+ leader (length trick)) 4) mine))
                 (return cards))
-            (setf cards (append cards (list (computer-card left leader trump trick)))))))
+            (let ((start (training-position hands declarer trump (subseq cards 0 (- (length cards) (length trick))))))
+                (setf cards (append cards (list (computer-hint-card start left leader trump trick memo))))))))
 
 (defparameter *training-hands*
     (mapcar #'suits (str2deal "N: ♣ KJ96 ♦ A8 ♥ AJ83 ♠ AK9
@@ -235,10 +326,21 @@ E: ♣ Q5 ♦ J9762 ♥ Q ♠ J6543
 S: ♣ 432 ♦ 1043 ♥ K10954 ♠ 87
 W: ♣ A1087 ♦ KQ5 ♥ 762 ♠ Q102")))
 
+; Fixed hands dealt for each dealer, S declaring: when some dealer gives S
+; the contract, the deal comes out with that dealer and S declaring
+(test (loop for dealer from 0 below 4
+            for d = (training-deal :declarer (lambda () (mapcar (lambda (s) (make-instance 'hand := (mapcar #'copy-list s)))
+                                                                *training-hands*))
+                                   1 dealer t)
+            always (or (null d) (and (= (second d) dealer) (= (third (fourth d)) 2))))
+      t
+      eq)
+
 ; The computer plays a whole deal legally (tested in slow-tests.cl); with
 ; declarer's seats left to the player (S declaring) it stops after the
 ; opening lead
-(test (length (computer-plays *training-hands* 2 2 nil '(2 0))) 1 eql)
+; (with a second for the lead: the search for it takes some 45 seconds)
+(test (let ((*hint-card-seconds* 1)) (length (computer-plays *training-hands* 2 2 nil '(2 0)))) 1 eql)
 
 ; Play of cards from the opening lead as an outcome of play-deal, for
 ; play-sequences
